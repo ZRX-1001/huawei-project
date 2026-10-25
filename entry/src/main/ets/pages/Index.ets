@@ -1,8 +1,7 @@
+import { UiTheme } from '../config/UiTheme'
 import { FEATURE_CATALOG } from '../config/FeatureCatalog'
-import { ActionItem, AgentMessage, FeatureDefinition } from '../models/AppModels'
-import { AgentService } from '../services/AgentService'
+import { AgentMessage, FeatureDefinition } from '../models/AppModels'
 import { SessionService, ChatSession, SessionSummary } from '../services/SessionService'
-import { ToolService } from '../services/ToolService'
 import { KnowledgeChunk, RetrievalOptions, RetrievalResult, SourceCitation } from '../models/RagModels'
 import { IntegrationService } from '../services/IntegrationService'
 import { RagConfig } from '../config/RagConfig'
@@ -16,6 +15,12 @@ import { AgentAnswer } from '../components/AgentAnswer'
 import { AttachmentService } from '../services/AttachmentService'
 import { ChatAttachment } from '../models/AttachmentModels'
 import { MarkdownParser } from '../services/MarkdownParser'
+import { MarkdownContent } from '../components/MarkdownContent'
+import { WorkspaceConfig } from '../config/WorkspaceConfig'
+import { WorkspaceService } from '../services/WorkspaceService'
+import { AgentToolCall, WorkspaceArtifact, WorkspaceProfile, WorkspaceState, WorkspaceTask } from '../models/WorkspaceModels'
+import { SidebarPreferences, SidebarView, SidebarWorkspaceGroup } from '../models/SidebarModels'
+import { SidebarService } from '../services/SidebarService'
 
 class ChatStreamSink implements StreamSink {
   private cancelled: () => boolean
@@ -48,7 +53,20 @@ class ChatVoiceObserver implements VoiceObserver {
 @Entry
 @Component
 struct Index {
+  @State features: FeatureDefinition[] = []
+  @State workspaceEditorVisible: boolean = false
+  @State workspaceName: string = ''
+  @State workspaceDescription: string = ''
+  @State workspacePrompt: string = ''
+  @State workspaceEditorNotice: string = ''
+  @State leftWidth: number = 256
+  @State rightWidth: number = 274
+  @State viewportWidth: number = 1280
+  @State resizingPanel: string = ''
+  @State hoveredGrip: string = ''
+  private dragStartWidth: number = 0
   @State activeFeature: string = 'home'
+  @State isWelcomePage: boolean = true
   @State activeSession: string = ''
   @State sessions: SessionSummary[] = []
   @State storageNotice: string = ''
@@ -62,10 +80,20 @@ struct Index {
   @State thinking: boolean = false
   @State sideExpanded: boolean = true
   @State recentsExpanded: boolean = true
+  @State expandedWorkspaceIds: string[] = []
+  @State expandedHistoryIds: string[] = []
+  @State showAllRecent: boolean = false
+  @State sidebarQuery: string = ''
+  @State sidebarSelection: string = ''
+  @State sidebarView: SidebarView = { workspaces: [], recent: [], recentCount: 0 }
   @State isTaskPanelVisible: boolean = true
   @State isLeftPanelVisible: boolean = true
   @State progress: number = 1
-  @State messages: AgentMessage[] = AgentService.greeting('home')
+  @State workspace: WorkspaceState = WorkspaceService.create('home')
+  @State artifactVisible: boolean = false
+  @State artifactTitle: string = ''
+  @State artifactContent: string = ''
+  @State messages: AgentMessage[] = []
   @State knowledgeQuery: string = ''
   @State contextPickerVisible: boolean = false
   @State selectedContext: SourceCitation[] = []
@@ -97,19 +125,32 @@ struct Index {
   private actionSerial: number = 0
   private activeGateway: AgentGateway | undefined = undefined
   private readonly chatScroller: Scroller = new Scroller()
+  private readonly workspaceScroller: Scroller = new Scroller()
   private minScore: number = 0.20
   private topK: number = 4
 
   private selectedFeature(): FeatureDefinition {
-    const feature = FEATURE_CATALOG.find((item: FeatureDefinition) => item.id === this.activeFeature)
+    const feature = this.features.find((item: FeatureDefinition) => item.id === this.activeFeature)
     return feature === undefined ? FEATURE_CATALOG[0] : feature
   }
 
+  private workspaceProfile(id: string = this.activeFeature): WorkspaceProfile { return WorkspaceConfig.profile(id, this.features) }
+
   aboutToAppear(): void {
+    this.features = SessionService.workspaces()
     IntegrationService.initializeVoice(this.getUIContext().getHostContext() as common.UIAbilityContext)
     this.refreshKnowledge()
-    const session = SessionService.current() || SessionService.create('home', '新对话', AgentService.greeting('home'))
-    this.restoreSession(session)
+    const savedSidebar = SessionService.sidebar()
+    const sidebar = SidebarService.normalize(savedSidebar)
+    this.sideExpanded = sidebar.workspaceSectionExpanded
+    this.recentsExpanded = sidebar.recentSectionExpanded
+    this.expandedWorkspaceIds = savedSidebar === undefined ? ['home'] : sidebar.expandedWorkspaceIds
+    this.expandedHistoryIds = sidebar.expandedHistoryIds
+    this.showAllRecent = sidebar.showAllRecent
+    this.isLeftPanelVisible = sidebar.panelVisible
+    this.leftWidth = sidebar.leftWidth || 256
+    this.rightWidth = sidebar.rightWidth || 274
+    this.chooseFeature(FEATURE_CATALOG[0])
     this.apiBaseUrl = IntegrationService.agentSettings.baseUrl
     this.apiModel = IntegrationService.agentSettings.model
     this.apiKey = IntegrationService.agentSettings.apiKey
@@ -235,6 +276,14 @@ struct Index {
       if (token === this.actionSerial) {
         this.moduleNotice = result.message
         this.moduleItems = result.ok ? result.items : []
+        if (result.ok) {
+          const id = `module-${this.activeFeature}-${action}`
+          const artifacts = this.workspace.artifacts.filter((item: WorkspaceArtifact) => item.id !== id)
+          if (artifacts.length < 8) artifacts.push({ id: id, title: `工具结果 · ${action}`,
+            content: `${result.message}\n\n${result.items.map((item: ModuleItem) => `### ${item.title}\n${item.detail}`).join('\n\n')}`.slice(0, 12000) })
+          this.workspace = WorkspaceService.update(this.workspace, { summary: result.message.slice(0, 3000), artifacts: artifacts })
+          this.persistSession()
+        }
       }
     } catch (error) {
       if (token === this.actionSerial) { this.moduleNotice = '操作失败，请重试。'; this.moduleItems = [] }
@@ -375,13 +424,17 @@ struct Index {
   }
 
   private persistSession(): void {
+    if (this.isWelcomePage || this.activeFeature === 'trash' || !this.activeSession) return
+    SessionService.saveWorkspace(this.activeSession, this.activeFeature, this.workspace)
     SessionService.saveDetails(this.activeSession, this.selectedContext, this.progress)
     SessionService.saveMessages(this.activeSession, this.messages)
     this.sessions = SessionService.list()
+    this.refreshSidebar()
     this.storageNotice = SessionService.storageNotice
   }
 
-  private restoreSession(session: ChatSession): void {
+  private restoreSession(session: ChatSession, reveal: boolean = true): void {
+    this.isWelcomePage = false
     this.importSerial++
     this.attachmentBusy = false
     const filesDir = (this.getUIContext().getHostContext() as common.UIAbilityContext).filesDir
@@ -392,6 +445,8 @@ struct Index {
     this.messages = session.messages
     this.selectedContext = session.context
     this.progress = session.progress
+    this.workspace = WorkspaceService.restore(session.featureId, session.workspace, this.features)
+    this.artifactVisible = false
     this.inputText = ''
     this.contextPickerVisible = false
     this.moduleInput = ''
@@ -401,31 +456,153 @@ struct Index {
     this.notice = ''
     SessionService.activate(session.id)
     this.sessions = SessionService.list()
+    this.refreshSidebar()
     this.storageNotice = SessionService.storageNotice
     const sessionId = session.id
     setTimeout(() => {
-      if (this.activeSession === sessionId) this.chatScroller.scrollEdge(Edge.Bottom)
+      if (this.activeSession === sessionId) {
+        this.chatScroller.scrollEdge(Edge.Bottom)
+        if (reveal) this.revealWorkspace()
+      }
     }, 50)
   }
 
-  private steps(): ActionItem[] {
-    if (this.activeFeature === 'forms') return ToolService.formSteps()
-    if (this.activeFeature === 'focus') return ToolService.focusSteps()
-    if (this.activeFeature === 'study') return ToolService.studySteps()
-    if (this.activeFeature === 'schedule') return ToolService.scheduleSteps()
-    if (this.activeFeature === 'budget') return ToolService.budgetSteps()
-    return ToolService.careerSteps()
+  private completedTasks(): number { return this.workspace.tasks.filter((task: WorkspaceTask) => task.status === 'completed').length }
+
+  private revealWorkspace(): void {
+    this.sideExpanded = true
+    if (!this.expandedWorkspaceIds.includes(this.activeFeature)) this.expandedWorkspaceIds = [...this.expandedWorkspaceIds, this.activeFeature]
+    const index = this.sessions.filter((item: SessionSummary) => item.featureId === this.activeFeature)
+      .findIndex((item: SessionSummary) => item.id === this.activeSession)
+    if (index >= SidebarService.workspacePreviewCount && !this.expandedHistoryIds.includes(this.activeFeature)) {
+      this.expandedHistoryIds = [...this.expandedHistoryIds, this.activeFeature]
+    }
+    this.persistSidebar()
+  }
+
+  private sidebarPreferences(): SidebarPreferences {
+    return { workspaceSectionExpanded: this.sideExpanded, recentSectionExpanded: this.recentsExpanded,
+      expandedWorkspaceIds: this.expandedWorkspaceIds, expandedHistoryIds: this.expandedHistoryIds,
+      showAllRecent: this.showAllRecent, panelVisible: this.isLeftPanelVisible, leftWidth: this.leftWidth, rightWidth: this.rightWidth }
+  }
+
+  private refreshSidebar(): void {
+    this.sidebarView = SidebarService.view(this.sessions, this.features, this.sidebarPreferences(), this.sidebarQuery)
+  }
+
+  private persistSidebar(): void {
+    SessionService.saveSidebar(this.sidebarPreferences())
+    this.storageNotice = SessionService.storageNotice
+    this.refreshSidebar()
+  }
+
+  private toggleWorkspaceGroup(id: string): void {
+    this.getUIContext().animateTo({ duration: 180, curve: Curve.EaseInOut }, () => {
+      this.expandedWorkspaceIds = this.expandedWorkspaceIds.includes(id)
+        ? this.expandedWorkspaceIds.filter((item: string) => item !== id) : [...this.expandedWorkspaceIds, id]
+      this.persistSidebar()
+    })
+  }
+
+  private toggleWorkspaceHistory(id: string): void {
+    this.expandedHistoryIds = this.expandedHistoryIds.includes(id)
+      ? this.expandedHistoryIds.filter((item: string) => item !== id) : [...this.expandedHistoryIds, id]
+    this.persistSidebar()
+  }
+
+  private toggleTask(id: string): void {
+    if (this.thinking || this.activeFeature === 'trash') return
+    const tasks = this.workspace.tasks.map((task: WorkspaceTask): WorkspaceTask => ({ id: task.id, title: task.title,
+      detail: task.detail, status: task.id === id ? (task.status === 'completed' ? 'pending' : 'completed') : task.status }))
+    this.workspace = WorkspaceService.update(this.workspace, { tasks: tasks })
+    this.persistSession()
+  }
+
+  private showArtifact(item: WorkspaceArtifact): void {
+    this.artifactTitle = item.title
+    this.artifactContent = item.content
+    this.artifactVisible = true
+  }
+
+  private async executeWorkspaceTool(call: AgentToolCall, token: number, sessionId: string): Promise<string> {
+    if (token !== this.requestSerial || sessionId !== this.activeSession) return JSON.stringify({ ok: false, message: '会话已切换或生成已停止。' })
+    const uiContext = this.getUIContext()
+    try {
+      const result = WorkspaceService.applyTool(call.name, call.arguments, this.activeFeature, this.workspace, this.features)
+      if (result.action !== undefined) {
+        const adapter = result.featureId === 'forms' ? IntegrationService.forms : result.featureId === 'study'
+          ? IntegrationService.study : IntegrationService.hardware
+        const moduleResult = await adapter.execute(result.action, result.input || '')
+        if (token !== this.requestSerial || sessionId !== this.activeSession) return JSON.stringify({ ok: false, message: '操作结果已过期，不再更新当前会话。' })
+        uiContext.runScopedTask(() => { this.moduleNotice = moduleResult.message; this.moduleItems = moduleResult.ok ? moduleResult.items : [] })
+        if (!moduleResult.ok) return JSON.stringify({ ok: false, message: moduleResult.message })
+        const id = `module-${result.featureId}-${result.action}`
+        const artifacts = result.state.artifacts.filter((item: WorkspaceArtifact) => item.id !== id)
+        if (artifacts.length < 8) artifacts.push({ id: id, title: `工具结果 · ${result.action}`,
+          content: `${moduleResult.message}\n\n${moduleResult.items.map((item: ModuleItem) => `### ${item.title}\n${item.detail}`).join('\n\n')}`.slice(0, 12000) })
+        result.state = WorkspaceService.update(result.state, { summary: moduleResult.message.slice(0, 3000), artifacts: artifacts })
+        result.message = moduleResult.message
+      }
+      if (token !== this.requestSerial || sessionId !== this.activeSession) return JSON.stringify({ ok: false, message: '生成已停止。' })
+      if (call.name !== 'read_workspace') {
+        uiContext.runScopedTask(() => {
+          this.activeFeature = result.featureId
+          this.workspace = result.state
+          this.isTaskPanelVisible = true
+          this.persistSession()
+          if (call.name === 'switch_workspace') this.revealWorkspace()
+        })
+        if (SessionService.storageNotice) return JSON.stringify({ ok: false, message: `面板已更新，但保存失败：${SessionService.storageNotice}` })
+      }
+      return JSON.stringify({ ok: true, message: result.message, workspace: WorkspaceService.snapshot(result.featureId, result.state, this.features) })
+    } catch (error) {
+      return JSON.stringify({ ok: false, message: (error as Error).message || '工作区操作失败。' })
+    }
   }
 
   private chooseFeature(feature: FeatureDefinition): void {
+    if (feature.id === 'trash') { this.openRecycleBin(); return }
     this.stopReply()
     this.persistSession()
     this.cancelVoice()
     this.stopSpeech()
     this.actionSerial++
     this.actionBusy = false
-    this.restoreSession(SessionService.latestForFeature(feature.id) ||
-      SessionService.create(feature.id, feature.name, AgentService.greeting(feature.id)))
+    this.importSerial++
+    this.attachmentBusy = false
+    const filesDir = (this.getUIContext().getHostContext() as common.UIAbilityContext).filesDir
+    this.draftAttachments.forEach((item: ChatAttachment) => AttachmentService.removeDraft(item, filesDir))
+    this.draftAttachments = []
+    this.activeSession = ''
+    this.activeFeature = feature.id
+    this.isWelcomePage = true
+    this.messages = []
+    this.workspace = WorkspaceService.create(feature.id, this.features)
+    this.progress = 0
+    this.selectedContext = []
+    this.expandedThoughts = []
+    this.inputText = ''
+    this.contextPickerVisible = false
+    this.artifactVisible = false
+    this.apiSettingsVisible = false
+    this.moduleInput = ''
+    this.moduleItems = []
+    this.moduleNotice = ''
+    this.notice = ''
+    this.sidebarQuery = ''
+    this.sessions = SessionService.list()
+    this.refreshSidebar()
+    this.storageNotice = SessionService.storageNotice
+  }
+
+  private openHome(): void {
+    this.sidebarSelection = 'workspace-home'
+    this.chooseFeature(FEATURE_CATALOG[0])
+  }
+
+  private welcomeGreeting(): string {
+    const hour = new Date().getHours()
+    return `${hour < 6 ? '夜深了' : hour < 12 ? '早上好' : hour < 18 ? '下午好' : '晚上好'}，欢迎回来`
   }
 
   private openSession(session: string): void {
@@ -438,7 +615,7 @@ struct Index {
     this.stopSpeech()
     this.actionSerial++
     this.actionBusy = false
-    this.restoreSession(saved)
+    this.restoreSession(saved, false)
   }
 
   private sessionTime(timestamp: number): string {
@@ -455,45 +632,167 @@ struct Index {
     if (session === undefined) return
     let confirmed = false
     try {
-      const result = await this.getUIContext().getPromptAction().showDialog({ title: '删除会话',
-        message: `删除“${session.title}”及其本地消息和附件？删除后无法撤销。`,
-        buttons: [{ text: '取消', color: '#657165' }, { text: '删除', color: '#B34F42' }] })
+      const permanent = session.featureId === 'trash'
+      const result = await this.getUIContext().getPromptAction().showDialog({ title: permanent ? '永久删除会话' : '移入回收站',
+        message: permanent ? `永久删除“${session.title}”及其本地消息和附件？此操作无法撤销。` : `将“${session.title}”移入回收站？消息和附件会被保留，可以恢复。`,
+        buttons: [{ text: '取消', color: '#666666' }, { text: permanent ? '永久删除' : '移入回收站', color: '#666666' }] })
       confirmed = result.index === 1
     } catch (_error) { return }
     if (!confirmed) return
     const active = id === this.activeSession
     if (active) {
       this.stopReply()
+      this.persistSession()
       this.cancelVoice()
       this.stopSpeech()
       this.actionSerial++
       this.actionBusy = false
     }
-    if (!SessionService.remove(id)) {
+    if (!(session.featureId === 'trash' ? SessionService.remove(id) : SessionService.trash(id))) {
       this.storageNotice = SessionService.storageNotice || '删除失败，请重试。'
       return
     }
     this.expandedThoughts = this.expandedThoughts.filter((item: string) => !item.startsWith(`${id}-`))
-    if (active) this.restoreSession(SessionService.current() || SessionService.create('home', '新对话', AgentService.greeting('home')))
-    else { this.sessions = SessionService.list(); this.storageNotice = SessionService.storageNotice }
+    if (active) this.openRecycleBin()
+    else { this.sessions = SessionService.list(); this.refreshSidebar(); this.storageNotice = SessionService.storageNotice }
   }
 
-  private createChat(): void {
+  private createChat(featureId: string = ''): void {
+    const target = (featureId || this.activeFeature) === 'trash' ? 'home' : featureId || this.activeFeature
+    this.chooseFeature(this.features.find((feature: FeatureDefinition) => feature.id === target) || FEATURE_CATALOG[0])
+    this.revealWorkspace()
+  }
+
+  private openRecycleBin(): void {
+    this.stopReply()
+    this.persistSession()
+    this.cancelVoice()
+    this.stopSpeech()
+    this.importSerial++
+    this.attachmentBusy = false
+    const filesDir = (this.getUIContext().getHostContext() as common.UIAbilityContext).filesDir
+    this.draftAttachments.forEach((item: ChatAttachment) => AttachmentService.removeDraft(item, filesDir))
+    this.draftAttachments = []
+    this.actionSerial++
+    this.actionBusy = false
+    this.activeFeature = 'trash'
+    this.isWelcomePage = false
+    this.activeSession = ''
+    this.messages = []
+    this.inputText = ''
+    this.notice = ''
+    this.contextPickerVisible = false
+    this.apiSettingsVisible = false
+    this.sidebarQuery = ''
+    this.sessions = SessionService.list()
+    this.revealWorkspace()
+    setTimeout((): void => { this.chatScroller.scrollEdge(Edge.Top) }, 30)
+  }
+
+  private restoreTrashSession(id: string): void {
     this.stopReply()
     this.persistSession()
     this.cancelVoice()
     this.stopSpeech()
     this.actionSerial++
     this.actionBusy = false
-    this.restoreSession(SessionService.create('home', '新对话', AgentService.greeting('home')))
+    if (!SessionService.restore(id)) { this.storageNotice = SessionService.storageNotice || '恢复失败，请重试。'; return }
+    const session = SessionService.get(id)
+    if (session !== undefined) this.restoreSession(session)
+  }
+
+  private startWorkspaceEditor(): void {
+    this.workspaceName = ''
+    this.workspaceDescription = ''
+    this.workspacePrompt = ''
+    this.workspaceEditorNotice = ''
+    this.workspaceEditorVisible = true
+  }
+
+  private saveNewWorkspace(): void {
+    try {
+      const feature = SessionService.addWorkspace(this.workspaceName, this.workspaceDescription, this.workspacePrompt)
+      if (feature === undefined) { this.workspaceEditorNotice = SessionService.storageNotice || '保存失败，请重试。'; return }
+      this.features = SessionService.workspaces()
+      this.workspaceEditorVisible = false
+      this.chooseFeature(feature)
+    } catch (error) { this.workspaceEditorNotice = (error as Error).message }
+  }
+
+  private async confirmDeleteWorkspace(id: string): Promise<void> {
+    if (id === 'home' || id === 'trash') return
+    const feature = this.features.find((item: FeatureDefinition) => item.id === id)
+    if (feature === undefined) return
+    const count = this.sessions.filter((item: SessionSummary) => item.featureId === id).length
+    try {
+      const result = await this.getUIContext().getPromptAction().showDialog({ title: `删除工作区「${feature.name}」`,
+        message: `其中 ${count} 个会话将全部移入回收站，消息、资料和附件会保留。恢复时，已删除工作区的会话会回到智能助理。`,
+        buttons: [{ text: '取消', color: '#666666' }, { text: '删除工作区', color: '#666666' }] })
+      if (result.index !== 1) return
+    } catch (_error) { return }
+    this.stopReply()
+    this.persistSession()
+    if (!SessionService.deleteWorkspace(id)) { this.storageNotice = SessionService.storageNotice || '删除失败，请重试。'; return }
+    this.features = SessionService.workspaces()
+    this.expandedWorkspaceIds = this.expandedWorkspaceIds.filter((value: string) => value !== id)
+    this.expandedHistoryIds = this.expandedHistoryIds.filter((value: string) => value !== id)
+    this.sessions = SessionService.list()
+    if (this.activeFeature === id) {
+      // The archived conversation has moved; do not persist the obsolete feature again.
+      this.activeFeature = 'trash'
+      this.activeSession = ''
+      this.openRecycleBin()
+    } else this.refreshSidebar()
+    this.persistSidebar()
+  }
+
+  private panelWidth(side: string): number {
+    const available = Math.max(180, this.viewportWidth - 360 -
+      (side === 'left' ? (this.isTaskPanelVisible && !this.isWelcomePage && this.activeFeature !== 'trash' ? this.rightWidth + 8 : 0)
+        : (this.isLeftPanelVisible ? this.leftWidth : 52) + 8))
+    return Math.min(side === 'left' ? this.leftWidth : this.rightWidth, available)
+  }
+
+  private resizePanel(side: string, offset: number): void {
+    const maximum = Math.max(side === 'left' ? 200 : 240, this.viewportWidth - 360 -
+      (side === 'left' ? (this.isTaskPanelVisible && !this.isWelcomePage && this.activeFeature !== 'trash' ? this.rightWidth + 16 : 8)
+        : (this.isLeftPanelVisible ? this.leftWidth : 52) + 16))
+    if (side === 'left') this.leftWidth = Math.round(Math.min(400, maximum, Math.max(200, this.dragStartWidth + offset)))
+    else this.rightWidth = Math.round(Math.min(420, maximum, Math.max(240, this.dragStartWidth - offset)))
+  }
+
+  @Styles
+  interactive() {
+    .hoverEffect(HoverEffect.Highlight)
+    .stateStyles({
+      normal: { .opacity(1).scale({ x: 1, y: 1 }) },
+      pressed: { .opacity(0.76).scale({ x: 0.98, y: 0.98 }) }
+    })
+    .animation({ duration: 140, curve: Curve.EaseOut })
+  }
+
+  @Styles
+  inputFeedback() {
+    .stateStyles({
+      normal: { .border({ width: 1, color: Color.Transparent }) },
+      focused: { .border({ width: 1, color: UiTheme.focus }).shadow({ radius: 8, color: UiTheme.shadow, offsetY: 0 }) }
+    })
+    .animation({ duration: 160, curve: Curve.EaseOut })
   }
 
   private sendMessage(prompt: string): void {
+    if (this.activeFeature === 'trash') return
     const message = prompt.trim() || (this.draftAttachments.length > 0 ? '请分析这些附件。' : '')
-    if (message.length === 0 || this.thinking || this.recording || this.voiceBusy || this.attachmentBusy) return
+    if (message.length === 0 || this.thinking || this.recording || this.voiceBusy || this.attachmentBusy || this.actionBusy) return
+    if (!this.activeSession) {
+      this.activeSession = SessionService.create(this.activeFeature, '新对话', []).id
+    }
+    this.isWelcomePage = false
     const token = ++this.requestSerial
     const uiContext = this.getUIContext()
     const featureId = this.activeFeature
+    const sessionId = this.activeSession
+    const workspace = WorkspaceService.copy(this.workspace)
     const history = this.messages.slice()
     const gateway = IntegrationService.agent
     this.activeGateway = gateway
@@ -549,7 +848,8 @@ struct Index {
           this.notice = result.notice
           this.updateReply(replyIndex, '', `${gateway.name} · ${sources.length} 条参考资料`, 'loading', sources, 'connecting')
         })
-      }, attachedContext, attachments).then(() => {
+      }, attachedContext, attachments, workspace, (call: AgentToolCall): Promise<string> =>
+        this.executeWorkspaceTool(call, token, sessionId), this.features).then(() => {
         uiContext.runScopedTask(() => {
           if (token === this.requestSerial) this.updateReply(replyIndex, content || '服务未返回内容，请重试。', gateway.name, content ? 'complete' : 'error', sources)
         })
@@ -574,34 +874,29 @@ struct Index {
   }
 
   private advanceTask(): void {
-    if (this.thinking) return
-    this.thinking = true
-    setTimeout(() => {
-      if (this.progress < 3) this.progress += 1
-      const nextText = this.progress === 2
-        ? '工具已完成第一轮分析，结果已保存到右侧产物区。你可以继续编辑，或让 Agent 根据结果推进下一步。'
-        : '流程已进入最后一步。完成后会生成一份可回看的总结报告，并保存到当前项目。'
-      this.messages = [...this.messages, { role: 'agent', content: nextText, meta: '工具调用完成 · 现在' }]
-      this.thinking = false
-      this.persistSession()
-    }, 650)
+    const next = this.workspace.tasks.find((task: WorkspaceTask) => task.status !== 'completed')
+    this.sendMessage(next === undefined ? '请根据当前对话和任务面板整理总结，并保存为产物。'
+      : `请继续帮助我完成任务「${next.title}」${next.detail ? `，任务详情：${next.detail}` : ''}。根据实际进展更新右侧任务面板，不要直接假定现实任务已经完成。`)
   }
 
   private toggleWorkspace(): void {
     this.getUIContext().animateTo({ duration: 240, curve: Curve.EaseInOut }, () => {
       this.sideExpanded = !this.sideExpanded
+      this.persistSidebar()
     })
   }
 
   private toggleRecents(): void {
     this.getUIContext().animateTo({ duration: 240, curve: Curve.EaseInOut }, () => {
       this.recentsExpanded = !this.recentsExpanded
+      this.persistSidebar()
     })
   }
 
   private toggleLeftPanel(): void {
     this.getUIContext().animateTo({ duration: 260, curve: Curve.EaseInOut }, () => {
       this.isLeftPanelVisible = !this.isLeftPanelVisible
+      this.persistSidebar()
     })
   }
 
@@ -612,158 +907,144 @@ struct Index {
   }
 
   @Builder
-  DashboardContent() {
-    Column({ space: 14 }) {
-      Text('今天，想推进哪一件事？').fontSize(25).fontWeight(FontWeight.Medium).fontColor('#252723')
-      Text('CampusPilot 会保留项目记忆，并把目标拆成可回看的行动。').fontSize(14).fontColor('#777A72')
-      Row({ space: 12 }) {
-        Column({ space: 8 }) {
-          Text('求职实验室').fontSize(16).fontWeight(FontWeight.Medium).fontColor('#2B2D28')
-          Text('简历诊断、岗位匹配、模拟面试').fontSize(12).fontColor('#74766F')
-          Text('开始准备 →').fontSize(12).fontColor('#356B58').fontWeight(FontWeight.Medium)
-        }.alignItems(HorizontalAlign.Start).width('31%').padding(16).backgroundColor('#FDF7F0').borderRadius(14).onClick(() => this.chooseFeature(FEATURE_CATALOG[1]))
-        Column({ space: 8 }) {
-          Text('智能日程').fontSize(16).fontWeight(FontWeight.Medium).fontColor('#2B2D28')
-          Text('课程、作业和个人安排').fontSize(12).fontColor('#74766F')
-          Text('整理本周 →').fontSize(12).fontColor('#356B58').fontWeight(FontWeight.Medium)
-        }.alignItems(HorizontalAlign.Start).width('31%').padding(16).backgroundColor('#F1F7F2').borderRadius(14).onClick(() => this.chooseFeature(FEATURE_CATALOG[2]))
-        Column({ space: 8 }) {
-          Text('消费洞察').fontSize(16).fontWeight(FontWeight.Medium).fontColor('#2B2D28')
-          Text('记账、预算与消费复盘').fontSize(12).fontColor('#74766F')
-          Text('查看账本 →').fontSize(12).fontColor('#356B58').fontWeight(FontWeight.Medium)
-        }.alignItems(HorizontalAlign.Start).width('31%').padding(16).backgroundColor('#F4F4FB').borderRadius(14).onClick(() => this.chooseFeature(FEATURE_CATALOG[3]))
-      }.width('100%').margin({ top: 8 })
-      Text('快速开始').fontSize(12).fontWeight(FontWeight.Medium).fontColor('#85877F').width('100%').margin({ top: 12 })
-      Row({ space: 8 }) {
-        Text('帮我制定秋招计划').fontSize(12).fontColor('#4E514B').padding(10).backgroundColor('#ECEDE8').borderRadius(9).onClick(() => this.sendMessage('帮我制定一份秋招计划。'))
-        Text('安排本周任务').fontSize(12).fontColor('#4E514B').padding(10).backgroundColor('#ECEDE8').borderRadius(9).onClick(() => this.sendMessage('请帮我安排本周任务。'))
-        Text('记录一笔消费').fontSize(12).fontColor('#4E514B').padding(10).backgroundColor('#ECEDE8').borderRadius(9).onClick(() => this.sendMessage('记录午餐 18 元。'))
-      }.width('100%')
-      Text('▤  搜索课程资料并加入当前对话  →').fontSize(12).fontColor('#356B58')
-        .width('100%').padding(11).backgroundColor('#EFF6F0').borderRadius(9)
-        .onClick(() => { this.contextPickerVisible = true })
-    }.width('100%').alignItems(HorizontalAlign.Start).padding({ top: 18, bottom: 8 })
-  }
-
-  @Builder
   CareerContent() {
     Column({ space: 12 }) {
       Row() {
         Column({ space: 4 }) {
-          Text('求职实验室').fontSize(24).fontWeight(FontWeight.Medium).fontColor('#252723')
-          Text('将岗位目标、简历版本和练习记录沉淀在同一项目。').fontSize(13).fontColor('#777A72')
+          Text('求职实验室').fontSize(24).fontWeight(FontWeight.Medium).fontColor(UiTheme.text)
+          Text('将岗位目标、简历版本和练习记录沉淀在同一项目。').fontSize(13).fontColor(UiTheme.muted)
         }.alignItems(HorizontalAlign.Start)
         Blank()
-        Text('产品经理 · 2027 届').fontSize(11).fontColor('#9B613D').padding(8).backgroundColor('#FFF3E8').borderRadius(8)
+        Text(this.workspace.goal || '先明确目标岗位').fontSize(11).fontColor('#666666').maxLines(2).constraintSize({ maxWidth: 200 })
+          .padding(8).backgroundColor(UiTheme.raised).borderRadius(8)
       }.width('100%')
       Row({ space: 10 }) {
         Column({ space: 5 }) {
-          Text('01').fontSize(12).fontColor('#9B613D')
-          Text('简历诊断').fontSize(15).fontWeight(FontWeight.Medium).fontColor('#33352F')
-          Text('提取岗位关键词与量化成果').fontSize(11).fontColor('#7C7E76')
-        }.alignItems(HorizontalAlign.Start).width('32%').padding(14).backgroundColor('#FFF8F1').borderRadius(12)
+          Text('01').fontSize(12).fontColor('#666666')
+          Text('简历诊断').fontSize(15).fontWeight(FontWeight.Medium).fontColor('#303030')
+          Text('提取岗位关键词与量化成果').fontSize(11).fontColor('#777777')
+        }.alignItems(HorizontalAlign.Start).width('32%').padding(14).backgroundColor(UiTheme.raised).borderRadius(12)
+          .enabled(!this.thinking).interactive().onClick(() => this.sendMessage('请根据我的目标岗位分析简历，列出需要提供的信息，并将优化清单同步到任务面板。'))
         Column({ space: 5 }) {
-          Text('02').fontSize(12).fontColor('#356B58')
-          Text('模拟面试').fontSize(15).fontWeight(FontWeight.Medium).fontColor('#33352F')
-          Text('多轮追问与反馈复盘').fontSize(11).fontColor('#7C7E76')
-        }.alignItems(HorizontalAlign.Start).width('32%').padding(14).backgroundColor('#F1F7F2').borderRadius(12)
+          Text('02').fontSize(12).fontColor(UiTheme.primary)
+          Text('模拟面试').fontSize(15).fontWeight(FontWeight.Medium).fontColor('#303030')
+          Text('多轮追问与反馈复盘').fontSize(11).fontColor('#777777')
+        }.alignItems(HorizontalAlign.Start).width('32%').padding(14).backgroundColor(UiTheme.raised).borderRadius(12)
+          .enabled(!this.thinking).interactive().onClick(() => this.sendMessage('开始一轮模拟面试，一次问一个问题，根据我的回答追问并保留复盘。'))
         Column({ space: 5 }) {
-          Text('03').fontSize(12).fontColor('#5E6EBA')
-          Text('投递追踪').fontSize(15).fontWeight(FontWeight.Medium).fontColor('#33352F')
-          Text('记录进展与复盘建议').fontSize(11).fontColor('#7C7E76')
-        }.alignItems(HorizontalAlign.Start).width('32%').padding(14).backgroundColor('#F2F4FC').borderRadius(12)
+          Text('03').fontSize(12).fontColor(UiTheme.primary)
+          Text('投递追踪').fontSize(15).fontWeight(FontWeight.Medium).fontColor('#303030')
+          Text('记录进展与复盘建议').fontSize(11).fontColor('#777777')
+        }.alignItems(HorizontalAlign.Start).width('32%').padding(14).backgroundColor(UiTheme.raised).borderRadius(12)
+          .enabled(!this.thinking).interactive().onClick(() => this.sendMessage('帮我整理投递追踪清单，只记录我已提供的信息，并保存为产物。'))
       }.width('100%')
     }.width('100%').alignItems(HorizontalAlign.Start).padding({ top: 18, bottom: 8 })
+      .transition(TransitionEffect.OPACITY.animation({ duration: 180 }))
   }
 
   @Builder
   ScheduleContent() {
     Column({ space: 12 }) {
-      Text('本周智能日程').fontSize(24).fontWeight(FontWeight.Medium).fontColor('#252723')
-      Text('Agent 会根据截止日期、预计耗时和精力曲线调整安排。').fontSize(13).fontColor('#777A72')
+      Text('本周智能日程').fontSize(24).fontWeight(FontWeight.Medium).fontColor(UiTheme.text)
+      Text('Agent 会根据截止日期、预计耗时和精力曲线调整安排。').fontSize(13).fontColor(UiTheme.muted)
       Row({ space: 10 }) {
         Column({ space: 5 }) {
-          Text('3').fontSize(28).fontWeight(FontWeight.Medium).fontColor('#356B58')
-          Text('今日待完成').fontSize(11).fontColor('#777A72')
-        }.alignItems(HorizontalAlign.Start).width('31%').padding(15).backgroundColor('#EFF6F0').borderRadius(12)
+          Text(`${this.workspace.tasks.length - this.completedTasks()}`).fontSize(28).fontWeight(FontWeight.Medium).fontColor(UiTheme.primary)
+          Text('待完成任务').fontSize(11).fontColor(UiTheme.muted)
+        }.alignItems(HorizontalAlign.Start).width('31%').padding(15).backgroundColor(UiTheme.raised).borderRadius(12)
         Column({ space: 5 }) {
-          Text('2h 40m').fontSize(22).fontWeight(FontWeight.Medium).fontColor('#356B58')
-          Text('深度学习时间').fontSize(11).fontColor('#777A72')
-        }.alignItems(HorizontalAlign.Start).width('31%').padding(15).backgroundColor('#EFF6F0').borderRadius(12)
+          Text(`${this.workspace.artifacts.length}`).fontSize(28).fontWeight(FontWeight.Medium).fontColor(UiTheme.primary)
+          Text('已保存计划').fontSize(11).fontColor(UiTheme.muted)
+        }.alignItems(HorizontalAlign.Start).width('31%').padding(15).backgroundColor(UiTheme.raised).borderRadius(12)
         Column({ space: 5 }) {
-          Text('85%').fontSize(28).fontWeight(FontWeight.Medium).fontColor('#356B58')
-          Text('本周计划完成度').fontSize(11).fontColor('#777A72')
-        }.alignItems(HorizontalAlign.Start).width('31%').padding(15).backgroundColor('#EFF6F0').borderRadius(12)
+          Text(`${this.workspace.tasks.length ? Math.round(this.completedTasks() / this.workspace.tasks.length * 100) : 0}%`).fontSize(28).fontWeight(FontWeight.Medium).fontColor(UiTheme.primary)
+          Text('任务完成度').fontSize(11).fontColor(UiTheme.muted)
+        }.alignItems(HorizontalAlign.Start).width('31%').padding(15).backgroundColor(UiTheme.raised).borderRadius(12)
       }.width('100%')
       Column({ space: 10 }) {
-        Text('今天的时间块').fontSize(14).fontWeight(FontWeight.Medium).fontColor('#3A3C36')
-        Row({ space: 10 }) { Text('14:00').fontSize(12).fontColor('#356B58').width(50); Text('数据结构作业').fontSize(14).fontColor('#3A3C36').layoutWeight(1); Text('50 分钟').fontSize(11).fontColor('#868880') }
-        Divider().color('#E5E7E1')
-        Row({ space: 10 }) { Text('16:00').fontSize(12).fontColor('#356B58').width(50); Text('产品分析小组讨论').fontSize(14).fontColor('#3A3C36').layoutWeight(1); Text('45 分钟').fontSize(11).fontColor('#868880') }
-      }.width('100%').padding(15).backgroundColor('#FFFFFF').borderRadius(12)
+        Text('当前安排 · 与任务面板同步').fontSize(14).fontWeight(FontWeight.Medium).fontColor('#404040')
+        ForEach(this.workspace.tasks, (task: WorkspaceTask) => {
+          Column({ space: 4 }) {
+            Text(`${task.status === 'completed' ? '✓' : '○'} ${task.title}`).fontSize(14).fontColor('#404040')
+            Text(task.detail || '待补充时间与要求').fontSize(11).fontColor('#888888')
+          }.width('100%').alignItems(HorizontalAlign.Start).padding({ top: 5, bottom: 5 }).enabled(!this.thinking)
+            .interactive().onClick(() => this.sendMessage(`请帮我细化安排「${task.title}」，已有详情：${task.detail || '无'}。更新任务面板。`))
+        }, (task: WorkspaceTask) => `${task.id}-${task.title}-${task.detail}-${task.status}`)
+      }.width('100%').padding(15).backgroundColor(UiTheme.surface).borderRadius(12)
     }.width('100%').alignItems(HorizontalAlign.Start).padding({ top: 18, bottom: 8 })
+      .transition(TransitionEffect.OPACITY.animation({ duration: 180 }))
   }
 
   @Builder
   BudgetContent() {
     Column({ space: 12 }) {
-      Text('消费洞察').fontSize(24).fontWeight(FontWeight.Medium).fontColor('#252723')
-      Text('每笔消费自动分类，预算变化和异常支出会及时提醒。').fontSize(13).fontColor('#777A72')
+      Text('消费洞察').fontSize(24).fontWeight(FontWeight.Medium).fontColor(UiTheme.text)
+      Text('整理你提供的消费与预算，清单和分析保存在当前会话。').fontSize(13).fontColor(UiTheme.muted)
       Row({ space: 10 }) {
-        Column({ space: 5 }) { Text('¥ 486').fontSize(25).fontWeight(FontWeight.Medium).fontColor('#3B5F9D'); Text('本月已支出').fontSize(11).fontColor('#777A72') }.alignItems(HorizontalAlign.Start).width('31%').padding(15).backgroundColor('#F1F4FC').borderRadius(12)
-        Column({ space: 5 }) { Text('¥ 714').fontSize(25).fontWeight(FontWeight.Medium).fontColor('#3B5F9D'); Text('剩余预算').fontSize(11).fontColor('#777A72') }.alignItems(HorizontalAlign.Start).width('31%').padding(15).backgroundColor('#F1F4FC').borderRadius(12)
-        Column({ space: 5 }) { Text('−8%').fontSize(25).fontWeight(FontWeight.Medium).fontColor('#3B5F9D'); Text('较上周变化').fontSize(11).fontColor('#777A72') }.alignItems(HorizontalAlign.Start).width('31%').padding(15).backgroundColor('#F1F4FC').borderRadius(12)
+        Column({ space: 5 }) { Text(`${this.workspace.tasks.length - this.completedTasks()}`).fontSize(25).fontWeight(FontWeight.Medium).fontColor(UiTheme.primary); Text('整理待办').fontSize(11).fontColor(UiTheme.muted) }.alignItems(HorizontalAlign.Start).width('31%').padding(15).backgroundColor(UiTheme.raised).borderRadius(12)
+        Column({ space: 5 }) { Text(`${this.workspace.artifacts.length}`).fontSize(25).fontWeight(FontWeight.Medium).fontColor(UiTheme.primary); Text('已保存产物').fontSize(11).fontColor(UiTheme.muted) }.alignItems(HorizontalAlign.Start).width('31%').padding(15).backgroundColor(UiTheme.raised).borderRadius(12)
+        Column({ space: 5 }) { Text(`${this.completedTasks()}`).fontSize(25).fontWeight(FontWeight.Medium).fontColor(UiTheme.primary); Text('已完成任务').fontSize(11).fontColor(UiTheme.muted) }.alignItems(HorizontalAlign.Start).width('31%').padding(15).backgroundColor(UiTheme.raised).borderRadius(12)
       }.width('100%')
       Column({ space: 8 }) {
-        Text('最近流水').fontSize(14).fontWeight(FontWeight.Medium).fontColor('#3A3C36')
-        Row() { Text('午餐').fontSize(14).fontColor('#3A3C36').layoutWeight(1); Text('餐饮 · 今天').fontSize(11).fontColor('#878981').margin({ right: 18 }); Text('− ¥18').fontSize(14).fontColor('#3B5F9D') }.width('100%')
-        Divider().color('#E5E7E1')
-        Row() { Text('咖啡').fontSize(14).fontColor('#3A3C36').layoutWeight(1); Text('休闲 · 今天').fontSize(11).fontColor('#878981').margin({ right: 18 }); Text('− ¥16').fontSize(14).fontColor('#3B5F9D') }.width('100%')
-      }.width('100%').padding(15).backgroundColor('#FFFFFF').borderRadius(12)
+        Text('消费整理与分析').fontSize(14).fontWeight(FontWeight.Medium).fontColor('#404040')
+        if (this.workspace.artifacts.length === 0) { Text('发送消费记录或预算后，让 Agent 整理并保存。').fontSize(12).fontColor('#888888') }
+        ForEach(this.workspace.artifacts, (item: WorkspaceArtifact) => {
+          Text(`▤ ${item.title} →`).fontSize(13).fontColor(UiTheme.primary).width('100%').padding({ top: 7, bottom: 7 })
+            .interactive().onClick(() => { this.isTaskPanelVisible = true; this.showArtifact(item) })
+        }, (item: WorkspaceArtifact) => `${item.id}-${item.title}-${item.content}`)
+      }.width('100%').padding(15).backgroundColor(UiTheme.surface).borderRadius(12)
     }.width('100%').alignItems(HorizontalAlign.Start).padding({ top: 18, bottom: 8 })
+      .transition(TransitionEffect.OPACITY.animation({ duration: 180 }))
   }
 
   @Builder
   PlaceholderContent() {
     Column({ space: 10 }) {
-      Text(this.selectedFeature().name).fontSize(24).fontWeight(FontWeight.Medium).fontColor('#252723')
-      Text(this.selectedFeature().description).fontSize(14).fontColor('#777A72')
-      Text('模块骨架已创建').fontSize(13).fontColor('#356B58').padding(9).backgroundColor('#EFF6F0').borderRadius(8)
-      Text('后续将在 services/tools 中接入对应工具，并以当前任务面板承载执行步骤和结果。').fontSize(13).fontColor('#686A63').lineHeight(20)
+      Text(this.selectedFeature().name).fontSize(24).fontWeight(FontWeight.Medium).fontColor(UiTheme.text)
+      Text(this.selectedFeature().description).fontSize(14).fontColor(UiTheme.muted)
+      Text(this.workspaceProfile().greeting).fontSize(13).fontColor('#666666').lineHeight(20)
     }.width('100%').alignItems(HorizontalAlign.Start).padding({ top: 24, bottom: 8 })
   }
 
   @Builder
-  ApiSettingsContent() {
-    Column({ space: 9 }) {
+  ApiSettingsSheet() {
+    Column({ space: 12 }) {
       Row() {
         Column({ space: 3 }) {
-          Text('连接外部模型').fontSize(17).fontWeight(FontWeight.Medium).fontColor('#252723')
-          Text('兼容 OpenAI Chat Completions API').fontSize(12).fontColor('#777A72')
+          Text('配置模型 API').fontSize(21).fontWeight(FontWeight.Medium).fontColor(UiTheme.text).id('api-settings-title')
+          Text('兼容 OpenAI Chat Completions API').fontSize(12).fontColor(UiTheme.muted)
         }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-        Text('关闭').fontSize(12).fontColor('#777A72').padding(8).onClick(() => this.toggleApiSettings())
+        Button('关闭').height(40).fontSize(13).fontColor(UiTheme.primary).backgroundColor(UiTheme.raised)
+          .id('api-settings-close').accessibilityText('关闭 API 配置窗口').interactive().onClick(() => this.apiSettingsVisible = false)
       }.width('100%')
+      Scroll() {
+      Column({ space: 12 }) {
+      Text('服务地址').fontSize(12).fontColor(UiTheme.secondary)
       TextInput({ text: this.apiBaseUrl, placeholder: '服务地址，例如 https://api.example.com/v1' })
-        .height(44).backgroundColor('#FFFFFF').borderRadius(9).padding({ left: 12, right: 8 })
-        .onChange((value: string) => this.apiBaseUrl = value)
+        .id('api-base-url').height(44).width('100%').backgroundColor(UiTheme.surface).borderRadius(9).padding({ left: 12, right: 8 })
+        .caretColor(UiTheme.primary).selectedBackgroundColor('#DDDDDD').inputFeedback().onChange((value: string) => this.apiBaseUrl = value)
+      Text('模型名称').fontSize(12).fontColor(UiTheme.secondary)
       TextInput({ text: this.apiModel, placeholder: '模型名称，例如 qwen-plus、deepseek-chat' })
-        .height(44).backgroundColor('#FFFFFF').borderRadius(9).padding({ left: 12, right: 8 })
-        .onChange((value: string) => this.apiModel = value)
+        .id('api-model').height(44).width('100%').backgroundColor(UiTheme.surface).borderRadius(9).padding({ left: 12, right: 8 })
+        .caretColor(UiTheme.primary).selectedBackgroundColor('#DDDDDD').inputFeedback().onChange((value: string) => this.apiModel = value)
+      Text('API Key').fontSize(12).fontColor(UiTheme.secondary)
       TextInput({ text: this.apiKey, placeholder: 'API Key（无鉴权服务可留空）' })
-        .type(InputType.Password).height(44).backgroundColor('#FFFFFF').borderRadius(9).padding({ left: 12, right: 8 })
-        .onChange((value: string) => this.apiKey = value)
-      Text('问题、近期对话和已选资料会发送给你填写的服务商。也可用本地文件 rawfile/local_api.json 配置；它已加入 Git 忽略，但会打入安装包，请勿公开分发含 Key 的安装包。')
-        .fontSize(11).fontColor('#777A72').lineHeight(18).width('100%')
+        .id('api-key').type(InputType.Password).height(44).width('100%').backgroundColor(UiTheme.surface).borderRadius(9).padding({ left: 12, right: 8 })
+        .caretColor(UiTheme.primary).selectedBackgroundColor('#DDDDDD').inputFeedback().onChange((value: string) => this.apiKey = value)
+      Text('对话及你选择的资料、附件会发送到此服务。')
+        .fontSize(11).fontColor(UiTheme.muted).lineHeight(18).width('100%')
       if (this.apiNotice.length > 0) {
-        Text(this.apiNotice).fontSize(12).fontColor('#88551A').lineHeight(18).width('100%')
-          .padding(9).backgroundColor('#FFF6E8').borderRadius(8)
+        Text(this.apiNotice).fontSize(12).fontColor('#666666').lineHeight(18).width('100%')
+          .padding(9).backgroundColor(UiTheme.raised).borderRadius(8)
       }
+      }.width('100%').alignItems(HorizontalAlign.Start).padding({ right: 8, bottom: 8 })
+      }.width('100%').layoutWeight(1).align(Alignment.TopStart).scrollBar(BarState.Auto)
       Row({ space: 8 }) {
-        Button('保存并使用').height(44).fontSize(13).fontColor('#F7F8F3').backgroundColor('#356B58')
-          .onClick(() => this.saveAgentApi())
+        Button('保存并使用').height(44).fontSize(13).fontColor(UiTheme.onPrimary).backgroundColor(UiTheme.primary)
+          .id('api-settings-save').interactive().onClick(() => this.saveAgentApi())
         if (this.apiConfigured) {
-          Button('清除配置').height(44).fontSize(12).fontColor('#596159').backgroundColor('#ECEDE8')
-            .onClick(() => {
+          Button('清除配置').height(44).fontSize(12).fontColor(UiTheme.secondary).backgroundColor(UiTheme.raised)
+            .interactive().onClick(() => {
               this.apiBaseUrl = ''
               this.apiModel = ''
               this.apiKey = ''
@@ -773,22 +1054,22 @@ struct Index {
             })
         }
       }.width('100%')
-    }.width('100%').alignItems(HorizontalAlign.Start).padding(14).backgroundColor('#F3F5EF').borderRadius(12)
+    }.width('100%').height('100%').alignItems(HorizontalAlign.Start).padding(24).backgroundColor(UiTheme.background)
   }
 
   @Builder
   ContextSheet() {
     Column({ space: 12 }) {
       Row() {
-        Text('添加上下文').fontSize(21).fontWeight(FontWeight.Medium).fontColor('#252723')
+        Text('添加上下文').fontSize(21).fontWeight(FontWeight.Medium).fontColor(UiTheme.text)
         Blank()
-        Button('完成').fontSize(13).height(40).fontColor('#F7F8F3').backgroundColor('#356B58')
-          .accessibilityText('完成并关闭上下文弹窗').onClick(() => this.contextPickerVisible = false)
+        Button('完成').fontSize(13).height(40).fontColor(UiTheme.onPrimary).backgroundColor(UiTheme.primary)
+          .accessibilityText('完成并关闭上下文弹窗').interactive().onClick(() => this.contextPickerVisible = false)
       }.width('100%')
-      Text(`已加入 ${this.selectedContext.length} 条资料，仅用于当前对话`).fontSize(12).fontColor('#7C897D').width('100%')
-      Divider().color('#E0E6DD')
+      Text(`已加入 ${this.selectedContext.length} 条资料，仅用于当前对话`).fontSize(12).fontColor(UiTheme.muted).width('100%')
+      Divider().color('#E5E5E5')
       Scroll() { this.KnowledgeContent() }.width('100%').layoutWeight(1).scrollBar(BarState.Auto)
-    }.width('100%').height('100%').padding(22).backgroundColor('#F7F9F4')
+    }.width('100%').height('100%').padding(22).backgroundColor(UiTheme.background)
   }
 
   @Builder
@@ -796,78 +1077,79 @@ struct Index {
     Column({ space: 12 }) {
       Row() {
         Column({ space: 4 }) {
-          Text('为当前对话添加资料').fontSize(19).fontWeight(FontWeight.Medium).fontColor('#252723')
-          Text(`${this.knowledgeCount} 个资料片段 · 索引 ${this.knowledgeRevision}`).fontSize(12).fontColor('#777A72')
+          Text('为当前对话添加资料').fontSize(19).fontWeight(FontWeight.Medium).fontColor(UiTheme.text)
+          Text(`${this.knowledgeCount} 个资料片段 · 索引 ${this.knowledgeRevision}`).fontSize(12).fontColor(UiTheme.muted)
         }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-        Button('刷新').height(44).fontSize(12).fontColor('#356B58').backgroundColor('#EFF6F0').onClick(() => this.refreshKnowledge())
+        Button('刷新').height(44).fontSize(12).fontColor(UiTheme.primary).backgroundColor(UiTheme.raised).interactive().onClick(() => this.refreshKnowledge())
       }.width('100%')
       if (this.knowledgeRevision === 'demo-1') {
-        Text('离线演示资料，不代表学校官方资料。').fontSize(12).fontColor('#88551A').width('100%').padding(10).backgroundColor('#FFF6E8').borderRadius(9)
+        Text('离线演示资料，不代表学校官方资料。').fontSize(12).fontColor('#666666').width('100%').padding(10).backgroundColor(UiTheme.raised).borderRadius(9).transition(TransitionEffect.OPACITY.animation({ duration: 160 }))
       }
       if (this.knowledgeCount === 0) {
-        Text('知识库尚未接入资料服务。可载入离线样例体验搜索和来源引用。').fontSize(13).fontColor('#777A72').lineHeight(21).width('100%')
-        Button('载入演示资料').height(44).fontSize(13).fontColor('#F7F8F3').backgroundColor('#356B58').onClick(() => this.loadDemoKnowledge())
+        Text('知识库尚未接入资料服务。可载入离线样例体验搜索和来源引用。').fontSize(13).fontColor(UiTheme.muted).lineHeight(21).width('100%')
+        Button('载入演示资料').height(44).fontSize(13).fontColor(UiTheme.onPrimary).backgroundColor(UiTheme.primary).interactive().onClick(() => this.loadDemoKnowledge())
       }
       Row({ space: 7 }) {
         Button(this.knowledgeCourse === '' ? '全部课程 ✓' : '全部课程').fontSize(12).height(44)
-          .fontColor('#356B58').backgroundColor(this.knowledgeCourse === '' ? '#EFF6F0' : '#F2F2ED')
-          .onClick(() => { this.knowledgeCourse = ''; if (this.knowledgeQuery.trim()) this.searchKnowledge() })
+          .fontColor(UiTheme.primary).backgroundColor(this.knowledgeCourse === '' ? UiTheme.raised : UiTheme.raised)
+          .interactive().onClick(() => { this.knowledgeCourse = ''; if (this.knowledgeQuery.trim()) this.searchKnowledge() })
         ForEach(this.knowledgeCourses, (course: string) => {
           Button(this.knowledgeCourse === course ? `${course} ✓` : course).fontSize(12).height(44)
-            .fontColor('#356B58').backgroundColor(this.knowledgeCourse === course ? '#EFF6F0' : '#F2F2ED')
-            .onClick(() => { this.knowledgeCourse = course; if (this.knowledgeQuery.trim()) this.searchKnowledge() })
+            .fontColor(UiTheme.primary).backgroundColor(this.knowledgeCourse === course ? UiTheme.raised : UiTheme.raised)
+            .interactive().onClick(() => { this.knowledgeCourse = course; if (this.knowledgeQuery.trim()) this.searchKnowledge() })
         }, (course: string) => course)
       }.width('100%')
       TextInput({ text: this.knowledgeQuery, placeholder: '搜索问题，例如：黑盒测试有哪些方法？' })
-        .height(44).backgroundColor('#FFFFFF').borderRadius(9).padding({ left: 12, right: 8 })
-        .onChange((value: string) => this.knowledgeQuery = value).onSubmit(() => this.searchKnowledge())
+        .height(44).backgroundColor(UiTheme.surface).borderRadius(9).padding({ left: 12, right: 8 })
+        .caretColor(UiTheme.primary).selectedBackgroundColor('#DDDDDD').inputFeedback().onChange((value: string) => this.knowledgeQuery = value).onSubmit(() => this.searchKnowledge())
       Row({ space: 8 }) {
-        Button(this.searchBusy ? '检索中…' : '搜索资料').height(44).fontSize(13).fontColor('#F7F8F3')
-          .backgroundColor('#356B58').enabled(!this.searchBusy).onClick(() => this.searchKnowledge())
-        Button(this.minScore <= 0.10 ? '恢复默认阈值' : '放宽匹配').height(44).fontSize(12).fontColor('#356B58').backgroundColor('#EFF6F0')
-          .onClick(() => { this.minScore = this.minScore <= 0.10 ? 0.35 : this.minScore - 0.05; if (this.knowledgeQuery.trim()) this.searchKnowledge() })
-        Button(`结果 ${this.topK}`).height(44).fontSize(12).fontColor('#356B58').backgroundColor('#EFF6F0')
-          .onClick(() => { this.topK = this.topK >= 6 ? 2 : this.topK + 1; if (this.knowledgeQuery.trim()) this.searchKnowledge() })
+        Button(this.searchBusy ? '检索中…' : '搜索资料').height(44).fontSize(13).fontColor(UiTheme.onPrimary)
+          .backgroundColor(UiTheme.primary).enabled(!this.searchBusy).interactive().onClick(() => this.searchKnowledge())
+        Button(this.minScore <= 0.10 ? '恢复默认阈值' : '放宽匹配').height(44).fontSize(12).fontColor(UiTheme.primary).backgroundColor(UiTheme.raised)
+          .interactive().onClick(() => { this.minScore = this.minScore <= 0.10 ? 0.35 : this.minScore - 0.05; if (this.knowledgeQuery.trim()) this.searchKnowledge() })
+        Button(`结果 ${this.topK}`).height(44).fontSize(12).fontColor(UiTheme.primary).backgroundColor(UiTheme.raised)
+          .interactive().onClick(() => { this.topK = this.topK >= 6 ? 2 : this.topK + 1; if (this.knowledgeQuery.trim()) this.searchKnowledge() })
       }.width('100%')
       if (this.retrieval.query.length > 0) {
         Text(`找到 ${this.retrieval.sources.length} 条来源 · ${this.retrieval.mode === 'hybrid' ? '混合检索' : '关键词检索'}`)
-          .fontSize(12).fontColor('#777A72').width('100%')
+          .fontSize(12).fontColor(UiTheme.muted).width('100%')
         ForEach(this.retrieval.sources, (source: SourceCitation) => {
           Column({ space: 7 }) {
-            Text(`[${source.number}] ${source.title}`).fontSize(14).fontWeight(FontWeight.Medium).fontColor('#33352F').width('100%')
-            Text(`${source.course} · ${source.location}`).fontSize(11).fontColor('#777A72').width('100%')
-            Text(source.excerpt).fontSize(13).fontColor('#4E514B').lineHeight(20)
+            Text(`[${source.number}] ${source.title}`).fontSize(14).fontWeight(FontWeight.Medium).fontColor('#303030').width('100%')
+            Text(`${source.course} · ${source.location}`).fontSize(11).fontColor(UiTheme.muted).width('100%')
+            Text(source.excerpt).fontSize(13).fontColor(UiTheme.secondary).lineHeight(20)
               .maxLines(this.expandedSourceId === source.chunkId ? 0 : 3).textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
-              .onClick(() => this.showCitation(source))
+              .interactive().onClick(() => this.showCitation(source))
             Button(this.expandedSourceId === source.chunkId ? '收起原文' : '查看并复制原文')
-              .height(44).fontSize(12).fontColor('#356B58').backgroundColor('#EFF6F0')
+              .height(44).fontSize(12).fontColor(UiTheme.primary).backgroundColor(UiTheme.raised)
               .accessibilityText(`查看引用 ${source.number} 的原文`)
-              .onClick(() => this.showCitation(source))
+              .interactive().onClick(() => this.showCitation(source))
             Button(this.selectedContext.some((item: SourceCitation) => item.chunkId === source.chunkId) ? '已加入当前对话 · 移除' : '加入当前对话')
-              .height(44).fontSize(12).fontColor('#356B58').backgroundColor('#F5F7F2')
-              .enabled(!this.thinking).onClick(() => this.toggleContextSource(source))
-          }.width('100%').alignItems(HorizontalAlign.Start).padding(13).backgroundColor('#FFFFFF')
-            .borderRadius(11).border({ width: 1, color: this.expandedSourceId === source.chunkId ? '#8BAF94' : '#E5E5DF' })
+              .height(44).fontSize(12).fontColor(UiTheme.primary).backgroundColor(UiTheme.raised)
+              .enabled(!this.thinking).interactive().onClick(() => this.toggleContextSource(source))
+          }.width('100%').alignItems(HorizontalAlign.Start).padding(13).backgroundColor(UiTheme.surface)
+            .borderRadius(11).border({ width: 1, color: this.expandedSourceId === source.chunkId ? '#AAAAAA' : UiTheme.border })
         }, (source: SourceCitation) => source.chunkId)
         if (this.retrieval.sources.length > 0) {
-          Button('带着问题返回会话').height(44).fontSize(13).fontColor('#F7F8F3').backgroundColor('#356B58')
-            .onClick(() => { this.contextPickerVisible = false; this.sendMessage(this.retrieval.query) })
+          Button('带着问题返回会话').height(44).fontSize(13).fontColor(UiTheme.onPrimary).backgroundColor(UiTheme.primary)
+            .interactive().onClick(() => { this.contextPickerVisible = false; this.sendMessage(this.retrieval.query) })
         }
         if (this.retrieval.notice.length > 0) {
-          Text(this.retrieval.notice).fontSize(12).fontColor('#88551A').width('100%').padding(10).backgroundColor('#FFF6E8').borderRadius(9)
+          Text(this.retrieval.notice).fontSize(12).fontColor('#666666').width('100%').padding(10).backgroundColor(UiTheme.raised).borderRadius(9).transition(TransitionEffect.OPACITY.animation({ duration: 160 }))
         }
       }
     }.width('100%').alignItems(HorizontalAlign.Start).padding({ top: 18, bottom: 8 })
+      .transition(TransitionEffect.OPACITY.animation({ duration: 180 }))
   }
 
   @Builder
   ModuleContent() {
     Column({ space: 10 }) {
-      Text(this.selectedFeature().name).fontSize(24).fontWeight(FontWeight.Medium).fontColor('#252723')
-      Text(this.selectedFeature().description).fontSize(14).fontColor('#777A72')
+      Text(this.selectedFeature().name).fontSize(24).fontWeight(FontWeight.Medium).fontColor(UiTheme.text)
+      Text(this.selectedFeature().description).fontSize(14).fontColor(UiTheme.muted)
       TextInput({ text: this.moduleInput, placeholder: '输入编号或当前模块的操作内容' }).height(44)
-        .backgroundColor('#FFFFFF').borderRadius(9).padding({ left: 12, right: 8 })
-        .onChange((value: string) => this.moduleInput = value)
+        .backgroundColor(UiTheme.surface).borderRadius(9).padding({ left: 12, right: 8 })
+        .caretColor(UiTheme.primary).selectedBackgroundColor('#DDDDDD').inputFeedback().onChange((value: string) => this.moduleInput = value)
       if (this.activeFeature === 'forms') {
         this.ModuleAction('查看表单模板', 'templates')
         this.ModuleAction('生成填报草稿', 'draft')
@@ -884,128 +1166,456 @@ struct Index {
         this.ModuleAction('结束专注', 'stop')
       }
       if (this.moduleNotice.length > 0) {
-        Text(this.moduleNotice).fontSize(13).fontColor('#596159').lineHeight(21).width('100%').padding(12).backgroundColor('#EFF6F0').borderRadius(10)
+        Text(this.moduleNotice).fontSize(13).fontColor(UiTheme.secondary).lineHeight(21).width('100%').padding(12).backgroundColor(UiTheme.raised).borderRadius(10)
       }
       ForEach(this.moduleItems, (item: ModuleItem) => {
         Column({ space: 6 }) {
-          Text(item.title).fontSize(14).fontColor('#33352F').width('100%')
-          Text(item.detail).fontSize(12).fontColor('#686A63').lineHeight(20).width('100%')
-        }.width('100%').padding(12).backgroundColor('#FFFFFF').borderRadius(10)
+          Text(item.title).fontSize(14).fontColor('#303030').width('100%')
+          Text(item.detail).fontSize(12).fontColor('#666666').lineHeight(20).width('100%')
+        }.width('100%').padding(12).backgroundColor(UiTheme.surface).borderRadius(10)
       }, (item: ModuleItem) => item.id)
     }.width('100%').alignItems(HorizontalAlign.Start).padding({ top: 20, bottom: 8 })
   }
 
   @Builder
   ModuleAction(label: string, action: string) {
-    Button(label).width('100%').height(44).fontSize(13).fontColor('#356B58')
-      .backgroundColor('#EFF6F0').enabled(!this.actionBusy).onClick(() => this.runModule(action))
+    Button(label).width('100%').height(44).fontSize(13).fontColor(UiTheme.primary)
+      .backgroundColor(UiTheme.raised).enabled(!this.actionBusy && !this.thinking).interactive().onClick(() => this.runModule(action))
+  }
+
+  @Builder
+  SidebarConversation(session: SessionSummary, nested: boolean) {
+    Row({ space: 4 }) {
+      Column({ space: 3 }) {
+        Text(session.title).fontSize(12).fontColor(this.activeSession === session.id ? '#F1F1F1' : '#BDBDBD')
+          .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
+        Text(`${nested ? '' : `${this.workspaceProfile(session.featureId).name} · `}${this.sessionTime(session.updatedAt)}`)
+          .fontSize(9).fontColor('#777777').maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
+      }.layoutWeight(1).height(44).justifyContent(FlexAlign.Center).alignItems(HorizontalAlign.Start)
+        .id(`sidebar-chat-${nested ? 'workspace' : 'recent'}-${session.id}`)
+        .accessibilityText(`${nested ? '工作区对话' : '最近对话'}：${session.title}，${this.workspaceProfile(session.featureId).name}，${this.sessionTime(session.updatedAt)}`)
+        .interactive().onClick(() => {
+          this.sidebarSelection = `chat-${nested ? 'workspace' : 'recent'}-${session.id}`
+          this.openSession(session.id)
+        })
+      if (this.sidebarSelection === `chat-${nested ? 'workspace' : 'recent'}-${session.id}`) {
+      Button({ type: ButtonType.Normal }) {
+        Image($r('app.media.ic_more_horizontal')).width(18).height(18)
+      }.width(28).height(36).padding(0).borderRadius(6).backgroundColor(Color.Transparent)
+        .accessibilityText(`会话操作：${session.title}`)
+        .id(`sidebar-chat-menu-${nested ? 'workspace' : 'recent'}-${session.id}`)
+        .interactive().bindMenu(session.featureId === 'trash'
+          ? [{ value: '恢复会话', action: () => this.restoreTrashSession(session.id) },
+            { value: '永久删除', action: () => this.confirmDeleteSession(session.id) }]
+          : [{ value: '移入回收站', action: () => this.confirmDeleteSession(session.id) }])
+      }
+    }.width('100%').padding({ left: nested ? 24 : 10, right: 4 }).margin({ bottom: 2 })
+      .backgroundColor(this.activeSession === session.id ? '#303030' : Color.Transparent).borderRadius(7)
+      .hoverEffect(HoverEffect.Highlight)
+  }
+
+  @Builder
+  SidebarWorkspace(group: SidebarWorkspaceGroup) {
+    Column({ space: 1 }) {
+      Row({ space: 4 }) {
+        Button({ type: ButtonType.Normal }) {
+          Image($r('app.media.ic_chevron_right')).width(14).height(14).rotate({ angle: group.expanded ? 90 : 0 })
+        }.width(20).height(34).padding(0).backgroundColor(Color.Transparent)
+          .id(`sidebar-folder-toggle-${group.feature.id}`)
+          .enabled(this.sidebarQuery.trim().length === 0)
+          .accessibilityText(`${group.expanded ? '收起' : '展开'}工作区：${group.feature.name}`)
+          .interactive().onClick(() => {
+            this.sidebarSelection = `workspace-${group.feature.id}`
+            this.toggleWorkspaceGroup(group.feature.id)
+          })
+        Row({ space: 8 }) {
+          Image($r('app.media.ic_folder')).width(17).height(17)
+          Text(group.feature.name).fontSize(12).fontColor(this.activeFeature === group.feature.id ? '#EEEEEE' : '#B5B5B5')
+            .fontWeight(this.activeFeature === group.feature.id ? FontWeight.Medium : FontWeight.Regular).layoutWeight(1)
+            .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+          if (group.totalCount > 0) { Text(`${group.totalCount}`).fontSize(10).fontColor('#747474') }
+        }.layoutWeight(1).height(34).id(`sidebar-folder-${group.feature.id}`).accessibilityText(`打开工作区：${group.feature.name}`)
+          .interactive().onClick(() => {
+            this.sidebarSelection = `workspace-${group.feature.id}`
+            this.chooseFeature(group.feature)
+          })
+        if (this.sidebarSelection === `workspace-${group.feature.id}`) {
+          Button({ type: ButtonType.Normal }) { Image($r('app.media.ic_more_horizontal')).width(18).height(18) }
+            .width(28).height(34).padding(0).borderRadius(6).backgroundColor(Color.Transparent)
+            .id(`sidebar-workspace-menu-${group.feature.id}`).accessibilityText(`管理工作区：${group.feature.name}`)
+            .interactive().bindMenu(group.feature.id === 'trash'
+              ? [{ value: group.expanded ? '收起会话' : '展开会话', action: () => this.toggleWorkspaceGroup(group.feature.id) }]
+              : group.feature.id === 'home'
+                ? [{ value: '新建对话', action: () => this.createChat(group.feature.id) }]
+                : [{ value: '新建对话', action: () => this.createChat(group.feature.id) },
+                  { value: '删除工作区', action: () => this.confirmDeleteWorkspace(group.feature.id) }])
+        }
+      }.width('100%').padding({ right: 4 }).backgroundColor(this.sidebarSelection === `workspace-${group.feature.id}` ? '#303030' : Color.Transparent)
+        .borderRadius(7).hoverEffect(HoverEffect.Highlight)
+      if (group.expanded) {
+        ForEach(group.sessions, (session: SessionSummary) => {
+          this.SidebarConversation(session, true)
+        }, (session: SessionSummary) => `workspace-${session.featureId}-${session.id}-${session.title}-${session.updatedAt}`)
+        if (group.totalCount === 0) {
+          Text(group.feature.id === 'trash' ? '回收站为空' : '暂无对话，选中工作区后从 ⋯ 新建').fontSize(10).fontColor('#686868').width('100%')
+            .padding({ left: 42, top: 7, bottom: 9 })
+        }
+        if (group.totalCount > SidebarService.workspacePreviewCount && this.sidebarQuery.trim().length === 0) {
+          Text(group.showAll ? '收起较早对话' : `显示其余 ${group.totalCount - group.sessions.length} 条`)
+            .fontSize(11).fontColor('#8D8D8D').width('100%').height(30).padding({ left: 42 })
+            .interactive().onClick(() => this.toggleWorkspaceHistory(group.feature.id))
+        }
+      }
+    }.width('100%').alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
+  SidebarContent() {
+    Column() {
+      if (this.isLeftPanelVisible) {
+        Row({ space: 8 }) {
+          Row({ space: 8 }) {
+          Text('C').fontSize(13).fontWeight(FontWeight.Medium).fontColor('#E4E4E4').width(25).height(25)
+            .textAlign(TextAlign.Center).padding({ top: 3 }).backgroundColor('#303030').borderRadius(7)
+          Text('CampusPilot').fontSize(14).fontColor('#E1E1E1').layoutWeight(1)
+          }.layoutWeight(1).height(34).borderRadius(7).id('brand-home').accessibilityText('CampusPilot，返回首页')
+            .interactive().onClick(() => this.openHome())
+          Button({ type: ButtonType.Normal }) { Image($r('app.media.ic_sidebar')).width(19).height(19) }
+            .width(32).height(34).padding(0).backgroundColor(Color.Transparent).id('sidebar-toggle').accessibilityText('收起左侧边栏')
+            .interactive().onClick(() => this.toggleLeftPanel())
+        }.width('100%').padding({ left: 6, right: 2 }).margin({ bottom: 12 })
+        Row({ space: 4 }) {
+          Row({ space: 10 }) {
+            Image($r('app.media.ic_compose')).width(18).height(18)
+            Text('对话').fontSize(13).fontColor('#DDDDDD')
+          }.layoutWeight(1).height(38).id('sidebar-conversations').accessibilityText('选中对话入口')
+            .interactive().onClick(() => this.sidebarSelection = 'section-conversations')
+          if (this.sidebarSelection === 'section-conversations') {
+            Button({ type: ButtonType.Normal }) { Image($r('app.media.ic_more_horizontal')).width(18).height(18) }
+              .width(28).height(34).padding(0).borderRadius(6).backgroundColor(Color.Transparent)
+              .id('sidebar-conversations-menu').accessibilityText('对话操作')
+              .interactive().bindMenu([{ value: '新建对话', action: () => this.createChat() }])
+          }
+        }.width('100%').height(38).padding({ left: 10, right: 4 }).borderRadius(7)
+          .backgroundColor(this.sidebarSelection === 'section-conversations' ? '#303030' : '#252525')
+        Row({ space: 8 }) {
+          Image($r('app.media.ic_search')).width(17).height(17)
+          TextInput({ text: this.sidebarQuery, placeholder: '搜索对话' }).layoutWeight(1).height(34).fontSize(12)
+            .id('sidebar-search')
+            .fontColor('#D0D0D0').placeholderColor('#777777').backgroundColor(Color.Transparent).padding(0)
+            .caretColor(UiTheme.primary).selectedBackgroundColor('#DDDDDD').inputFeedback().onChange((value: string) => { this.sidebarQuery = value; this.sidebarSelection = ''; this.refreshSidebar() })
+          if (this.sidebarQuery.length > 0) {
+            Button('×').width(22).height(28).padding(0).fontSize(16).fontColor('#AAAAAA').backgroundColor(Color.Transparent)
+              .accessibilityText('清除对话搜索').interactive().onClick(() => { this.sidebarQuery = ''; this.refreshSidebar() })
+          }
+        }.height(36).width('100%').padding({ left: 10, right: 6 }).margin({ top: 4, bottom: 12 })
+        Scroll(this.workspaceScroller) {
+          Column({ space: 3 }) {
+            Row() {
+              Row({ space: 7 }) {
+                Text('工作区').fontSize(11).fontColor('#808080')
+                Image($r('app.media.ic_chevron_right')).width(13).height(13)
+                  .rotate({ angle: this.sideExpanded || this.sidebarQuery.trim().length > 0 ? 90 : 0 })
+              }.layoutWeight(1).height(30).enabled(this.sidebarQuery.trim().length === 0)
+                .id('sidebar-workspaces-toggle')
+                .accessibilityText(this.sideExpanded ? '收起工作区分组' : '展开工作区分组').interactive().onClick(() => {
+                  this.sidebarSelection = 'section-workspaces'
+                  this.toggleWorkspace()
+                })
+              if (this.sidebarSelection === 'section-workspaces') {
+                Button({ type: ButtonType.Normal }) { Image($r('app.media.ic_more_horizontal')).width(18).height(18) }
+                  .width(28).height(30).padding(0).borderRadius(6).backgroundColor(Color.Transparent)
+                  .id('sidebar-workspaces-menu').accessibilityText('工作区操作')
+                  .interactive().bindMenu([{ value: '新建工作区', action: () => this.startWorkspaceEditor() }])
+              }
+            }.width('100%').padding({ left: 10, right: 4 })
+            if (this.sideExpanded || this.sidebarQuery.trim().length > 0) {
+              ForEach(this.sidebarView.workspaces, (group: SidebarWorkspaceGroup) => {
+                this.SidebarWorkspace(group)
+              }, (group: SidebarWorkspaceGroup) => `${group.feature.id}-${group.expanded}-${group.showAll}-${group.totalCount}-${group.sessions.map((session: SessionSummary) => `${session.id}-${session.title}-${session.updatedAt}`).join('|')}`)
+            }
+            Row() {
+              Text(this.sidebarQuery.trim() ? '最近对话 · 搜索结果' : '最近对话').fontSize(11).fontColor('#808080').layoutWeight(1)
+              Image($r('app.media.ic_chevron_right')).width(13).height(13)
+                .rotate({ angle: this.recentsExpanded || this.sidebarQuery.trim().length > 0 ? 90 : 0 })
+            }.width('100%').height(28).padding({ left: 10, right: 9 }).margin({ top: 14 })
+              .id('sidebar-recents-toggle')
+              .enabled(this.sidebarQuery.trim().length === 0).accessibilityText(this.recentsExpanded ? '收起最近对话' : '展开最近对话')
+              .interactive().onClick(() => { this.sidebarSelection = 'section-recents'; this.toggleRecents() })
+            if (this.recentsExpanded || this.sidebarQuery.trim().length > 0) {
+              ForEach(this.sidebarView.recent, (session: SessionSummary) => {
+                this.SidebarConversation(session, false)
+              }, (session: SessionSummary) => `recent-${session.featureId}-${session.id}-${session.title}-${session.updatedAt}`)
+              if (this.sidebarView.recentCount === 0) {
+                Text(this.sidebarQuery.trim() ? '没有匹配的对话' : '暂无对话').fontSize(11).fontColor('#686868')
+                  .width('100%').padding({ left: 10, top: 8, bottom: 8 })
+              }
+              if (this.sidebarView.recentCount > SidebarService.recentPreviewCount && this.sidebarQuery.trim().length === 0) {
+                Text(this.showAllRecent ? '收起较早对话' : `显示全部 ${this.sidebarView.recentCount} 条对话`)
+                  .fontSize(11).fontColor('#8D8D8D').width('100%').height(32).padding({ left: 10 })
+                  .interactive().onClick(() => { this.showAllRecent = !this.showAllRecent; this.persistSidebar() })
+              }
+            }
+          }.width('100%').alignItems(HorizontalAlign.Start).padding({ bottom: 14, right: 12 })
+        }.layoutWeight(1).width('100%').align(Alignment.TopStart).scrollBar(BarState.Auto).scrollBarWidth(3).scrollBarColor('#666666')
+        Row({ space: 7 }) {
+          Text('●').fontSize(8).fontColor(this.apiConfigured ? '#999999' : '#737373')
+          Text(this.apiConfigured ? '模型已配置' : '尚未配置模型').fontSize(10).fontColor('#858585').layoutWeight(1)
+          Text('本地保存').fontSize(10).fontColor('#686868')
+        }.height(32).width('100%').padding({ left: 8, right: 8 }).margin({ top: 6 })
+      } else {
+        Button({ type: ButtonType.Normal }) { Image($r('app.media.ic_sidebar')).width(21).height(21) }
+          .width(36).height(38).padding(0).backgroundColor(Color.Transparent).id('sidebar-expand').accessibilityText('展开左侧边栏')
+          .interactive().onClick(() => this.toggleLeftPanel())
+        if (this.sidebarSelection === 'section-conversations') {
+          Button({ type: ButtonType.Normal }) { Image($r('app.media.ic_more_horizontal')).width(21).height(21) }
+            .width(36).height(38).padding(0).margin({ top: 8 }).backgroundColor(Color.Transparent)
+            .id('sidebar-conversations-menu-rail').accessibilityText('对话操作')
+            .interactive().bindMenu([{ value: '新建对话', action: () => this.createChat() }])
+        } else {
+          Button({ type: ButtonType.Normal }) { Image($r('app.media.ic_compose')).width(21).height(21) }
+            .width(36).height(38).padding(0).margin({ top: 8 }).backgroundColor(Color.Transparent)
+            .id('sidebar-conversations-rail').accessibilityText('选中对话入口')
+            .interactive().onClick(() => this.sidebarSelection = 'section-conversations')
+        }
+        Blank()
+        Text('C').fontSize(13).fontColor('#999999').height(32).width(36).textAlign(TextAlign.Center)
+          .id('brand-home-rail').accessibilityText('CampusPilot，返回首页').interactive().onClick(() => this.openHome())
+      }
+    }.width(this.isLeftPanelVisible ? this.panelWidth('left') : 52).height('100%').padding(this.isLeftPanelVisible ? 12 : 8)
+      .backgroundColor('#191919').alignItems(HorizontalAlign.Start)
+      .bindSheet($$this.workspaceEditorVisible, this.WorkspaceEditor(), { height: '78%', width: 600,
+        preferType: SheetType.CENTER, showClose: false, dragBar: false })
+  }
+
+  @Builder
+  WorkspaceEditor() {
+    Column({ space: 14 }) {
+      Row() {
+        Text('新建工作区').fontSize(21).fontWeight(FontWeight.Medium).layoutWeight(1)
+        Button('取消').height(40).fontSize(13).fontColor('#777777').backgroundColor(UiTheme.raised)
+          .interactive().onClick(() => this.workspaceEditorVisible = false)
+      }.width('100%')
+      Text('智能助理会根据名称、说明和提示词，把适合的对话归入已有工作区。').fontSize(13).fontColor('#777777').width('100%')
+      TextInput({ text: this.workspaceName, placeholder: '工作区名称（必填）' }).height(46).maxLength(40).id('workspace-name')
+        .caretColor(UiTheme.primary).selectedBackgroundColor('#DDDDDD').inputFeedback().onChange((value: string) => this.workspaceName = value)
+      TextInput({ text: this.workspaceDescription, placeholder: '适合处理什么内容' }).height(46).maxLength(160).id('workspace-description')
+        .caretColor(UiTheme.primary).selectedBackgroundColor('#DDDDDD').inputFeedback().onChange((value: string) => this.workspaceDescription = value)
+      TextArea({ text: this.workspacePrompt, placeholder: 'Agent 的角色与工作方式（可选）' }).layoutWeight(1).width('100%')
+        .maxLength(3000).id('workspace-prompt').caretColor(UiTheme.primary).selectedBackgroundColor('#DDDDDD').inputFeedback().onChange((value: string) => this.workspacePrompt = value)
+      if (this.workspaceEditorNotice) { Text(this.workspaceEditorNotice).fontSize(12).fontColor('#666666').width('100%') }
+      Button('创建工作区').width('100%').height(46).backgroundColor(UiTheme.primary).fontColor(UiTheme.surface)
+        .id('workspace-save').enabled(this.workspaceName.trim().length > 0).interactive().onClick(() => this.saveNewWorkspace())
+    }.padding(24).width('100%').height('100%').backgroundColor(UiTheme.background)
+  }
+
+  @Builder
+  ResizeHandle(side: string) {
+    Column() {
+      Blank()
+      Column().width(3).height(42).borderRadius(3)
+        .backgroundColor(this.resizingPanel === side || this.hoveredGrip === side ? '#999999' : '#CCCCCC')
+      Blank()
+    }.width(8).height('100%').backgroundColor(this.resizingPanel === side || this.hoveredGrip === side ? '#EDEDED' : UiTheme.raised)
+      .id(`resize-${side}`).accessibilityText(`拖动调整${side === 'left' ? '左' : '右'}侧栏宽度，双击恢复默认`)
+      .onHover((hover: boolean) => this.hoveredGrip = hover ? side : '')
+      .gesture(PanGesture({ direction: PanDirection.Horizontal, distance: 1 })
+        .onActionStart(() => { this.resizingPanel = side; this.dragStartWidth = side === 'left' ? this.panelWidth('left') : this.panelWidth('right') })
+        .onActionUpdate((event: GestureEvent) => this.resizePanel(side, event.offsetX))
+        .onActionEnd(() => { this.resizingPanel = ''; this.persistSidebar() })
+        .onActionCancel(() => { this.resizingPanel = ''; this.persistSidebar() }))
+      .parallelGesture(TapGesture({ count: 2 }).onAction(() => {
+        this.getUIContext().animateTo({ duration: 180, curve: Curve.EaseOut }, () => {
+          if (side === 'left') this.leftWidth = 256
+          else this.rightWidth = 274
+        })
+        this.persistSidebar()
+      }))
+  }
+
+  @Builder
+  TrashContent() {
+    Column({ space: 12 }) {
+      Text('回收站').fontSize(25).fontWeight(FontWeight.Medium).fontColor('#303030')
+      Text('会话及附件保存在本机。恢复到原工作区；原工作区已删除时，恢复到智能助理。')
+        .fontSize(13).fontColor(UiTheme.muted).lineHeight(21)
+      if (this.sessions.filter((session: SessionSummary) => session.featureId === 'trash').length === 0) {
+        Text('回收站为空').fontSize(15).fontColor('#999999').padding({ top: 36, bottom: 36 })
+      }
+      ForEach(this.sessions.filter((session: SessionSummary) => session.featureId === 'trash')
+        .sort((a: SessionSummary, b: SessionSummary) => (b.deletedAt || b.updatedAt) - (a.deletedAt || a.updatedAt)), (session: SessionSummary) => {
+        Column({ space: 8 }) {
+          Text(session.title).fontSize(15).fontColor('#303030').width('100%')
+          Text(`${session.originFeatureName || '智能助理'} · 移入时间 ${this.sessionTime(session.deletedAt || session.updatedAt)}`)
+            .fontSize(11).fontColor(UiTheme.muted).width('100%')
+          Row({ space: 8 }) {
+            Button('查看对话').height(38).fontSize(12).fontColor(UiTheme.primary).backgroundColor(UiTheme.raised)
+              .id(`trash-view-${session.id}`).interactive().onClick(() => this.openSession(session.id))
+            Button('恢复').height(38).fontSize(12).fontColor(UiTheme.surface).backgroundColor(UiTheme.primary)
+              .id(`trash-restore-${session.id}`).interactive().onClick(() => this.restoreTrashSession(session.id))
+            Blank()
+            Button('永久删除').height(38).fontSize(12).fontColor('#666666').backgroundColor(UiTheme.raised)
+              .id(`trash-delete-${session.id}`).interactive().onClick(() => this.confirmDeleteSession(session.id))
+          }.width('100%')
+        }.width('100%').padding(16).backgroundColor(UiTheme.surface).borderRadius(12)
+          .border({ width: 1, color: this.activeSession === session.id ? '#999999' : UiTheme.raised })
+      }, (session: SessionSummary) => `trash-${session.id}-${session.deletedAt}`)
+      if (this.activeSession) { Text('以下为所选会话的只读记录').fontSize(12).fontColor(UiTheme.muted).padding({ top: 20 }) }
+    }.width('100%').padding({ top: 20, bottom: 14 }).alignItems(HorizontalAlign.Start)
+  }
+
+  @Builder
+  ArtifactSheet() {
+    Column({ space: 14 }) {
+      Row() {
+        Text(this.artifactTitle).fontSize(20).fontWeight(FontWeight.Medium).fontColor(UiTheme.text).layoutWeight(1)
+        Button('关闭').height(44).fontSize(13).fontColor(UiTheme.primary).backgroundColor(UiTheme.raised)
+          .interactive().onClick(() => this.artifactVisible = false)
+      }.width('100%')
+      Text('已保存在当前会话 · 长按正文可复制').fontSize(12).fontColor(UiTheme.muted).width('100%')
+      Scroll() { MarkdownContent({ content: this.artifactContent }) }.width('100%').layoutWeight(1).align(Alignment.TopStart)
+    }.width('100%').height('100%').padding(22).backgroundColor(UiTheme.background)
+  }
+
+  @Builder
+  WelcomeContent() {
+    Column({ space: 18 }) {
+      Text(this.welcomeGreeting()).fontSize(14).fontColor(UiTheme.muted).id('welcome-greeting')
+      Text(this.activeFeature === 'home' ? '今天准备做些什么？' : `准备在${this.selectedFeature().name}里做些什么？`)
+        .fontSize(30).fontWeight(FontWeight.Medium).fontColor(UiTheme.text).textAlign(TextAlign.Center)
+        .lineHeight(42).width('100%').id('welcome-title')
+      Text(this.activeFeature === 'home' ? '说说你的想法，我们一起把它变成下一步行动。' : this.workspaceProfile().greeting)
+        .fontSize(14).fontColor(UiTheme.muted).textAlign(TextAlign.Center).lineHeight(23).width('100%')
+      Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Center }) {
+        ForEach(this.workspaceProfile().starters, (prompt: string) => {
+          Text(prompt).fontSize(13).fontColor('#666666').padding({ left: 15, right: 15, top: 12, bottom: 12 })
+            .margin({ left: 4, right: 4, bottom: 9 }).backgroundColor(UiTheme.raised).borderRadius(12)
+            .interactive().onClick(() => this.sendMessage(prompt))
+        }, (prompt: string) => `welcome-${this.activeFeature}-${prompt}`)
+      }.width('100%').margin({ top: 8 })
+      if (this.activeFeature === 'home') {
+        Flex({ wrap: FlexWrap.Wrap, justifyContent: FlexAlign.Center }) {
+          ForEach(this.features.filter((feature: FeatureDefinition) => feature.id !== 'home' && feature.id !== 'trash').slice(0, 4), (feature: FeatureDefinition) => {
+            Text(`${feature.name} →`).fontSize(12).fontColor(UiTheme.muted).padding(10).margin({ right: 5, bottom: 5 })
+              .borderRadius(8).interactive().onClick(() => {
+                this.sidebarSelection = `workspace-${feature.id}`
+                this.chooseFeature(feature)
+              })
+          }, (feature: FeatureDefinition) => `welcome-link-${feature.id}`)
+        }.width('100%')
+      }
+      if (this.notice) { Text(this.notice).fontSize(12).fontColor('#666666').lineHeight(20).textAlign(TextAlign.Center) }
+      if (this.storageNotice) { Text(this.storageNotice).fontSize(12).fontColor('#666666').lineHeight(20).textAlign(TextAlign.Center) }
+    }.width('100%').constraintSize({ maxWidth: 760 }).padding({ left: 32, right: 32, top: 28, bottom: 28 })
+      .transition(TransitionEffect.OPACITY.animation({ duration: 180 }))
+  }
+
+  @Builder
+  WorkspaceAssistantContent() {
+    Column({ space: 9 }) {
+      Text(this.workspaceProfile().role).fontSize(12).fontColor(UiTheme.primary)
+      Flex({ wrap: FlexWrap.Wrap }) {
+        ForEach(this.workspaceProfile().starters, (prompt: string) => {
+          Text(prompt).fontSize(12).fontColor('#666666').padding(10).margin({ right: 8, bottom: 8 })
+            .backgroundColor(UiTheme.raised).borderRadius(9).enabled(!this.thinking)
+            .interactive().onClick(() => this.sendMessage(prompt))
+        }, (prompt: string) => `${this.activeFeature}-${prompt}`)
+      }.width('100%')
+    }.alignItems(HorizontalAlign.Start).width('100%').padding({ top: 8, bottom: 8 })
+      .transition(TransitionEffect.OPACITY.animation({ duration: 180 }))
   }
 
   @Builder
   TaskPanel() {
+    Scroll() {
     Column({ space: 13 }) {
-      Row() { Text('任务面板').fontSize(15).fontWeight(FontWeight.Medium).fontColor('#272824'); Blank(); Text('•••').fontSize(18).fontColor('#777971') }.width('100%')
-      Text(this.activeFeature === 'home' ? '项目记忆与快捷操作' : `${this.selectedFeature().name}进度`).fontSize(12).fontColor('#777A72')
+      Row() { Text('任务面板').fontSize(15).fontWeight(FontWeight.Medium).fontColor('#202020'); Blank(); Text('会话内保存').fontSize(10).fontColor('#777777') }.width('100%')
+      Text(this.workspace.goal || `${this.selectedFeature().name} · 等待明确目标`).fontSize(13).fontColor('#666666').width('100%').copyOption(CopyOptions.InApp)
       Column({ space: 8 }) {
-        Row() { Text('当前流程').fontSize(13).fontWeight(FontWeight.Medium).fontColor('#3A3C36'); Blank(); Text(`${this.progress}/3`).fontSize(12).fontColor('#356B58') }.width('100%')
-        Row() { Row().width(this.progress === 1 ? '33%' : this.progress === 2 ? '66%' : '100%').height(5).backgroundColor('#356B58').borderRadius(4); Blank() }.width('100%').height(5).backgroundColor('#E1E3DD').borderRadius(4)
-      }.width('100%').padding(13).backgroundColor('#EFF6F0').borderRadius(12)
-      ForEach(this.steps(), (step: ActionItem, index: number) => {
+        Row() { Text('任务进度').fontSize(13).fontWeight(FontWeight.Medium).fontColor('#404040'); Blank(); Text(`${this.completedTasks()}/${this.workspace.tasks.length}`).fontSize(12).fontColor(UiTheme.primary) }.width('100%')
+        Row() { Row().width(`${this.workspace.tasks.length === 0 ? 0 : this.completedTasks() / this.workspace.tasks.length * 100}%`).height(5).backgroundColor(UiTheme.primary).borderRadius(4); Blank() }.width('100%').height(5).backgroundColor('#E5E5E5').borderRadius(4)
+      }.width('100%').padding(13).backgroundColor(UiTheme.raised).borderRadius(12)
+      ForEach(this.workspace.tasks, (task: WorkspaceTask) => {
         Row({ space: 9 }) {
-          Text(index < this.progress ? '✓' : '○').fontSize(14).fontColor(index < this.progress ? '#356B58' : '#A1A39B')
-          Column({ space: 2 }) { Text(step.title).fontSize(13).fontColor('#3D3F39'); Text(index < this.progress ? '已完成并保存' : step.subtitle).fontSize(10).fontColor('#8E9088') }.alignItems(HorizontalAlign.Start)
-        }.width('100%').padding({ top: 6, bottom: 6 })
-      }, (step: ActionItem) => step.title)
-      Button(this.progress < 3 ? '推进下一步' : '生成总结报告').width('100%').height(40).fontSize(13).fontColor('#F7F8F3').backgroundColor('#356B58').borderRadius(9).onClick(() => this.advanceTask())
-      Text('产物与记忆').fontSize(12).fontWeight(FontWeight.Medium).fontColor('#777A72').width('100%').margin({ top: 4 })
-      Text('▤  当前任务总结\n    可编辑 · 可导出 · 待接入本地持久化').fontSize(12).fontColor('#50524B').lineHeight(19).width('100%').padding(12).backgroundColor('#FFFFFF').borderRadius(10)
-    }.width(274).height('100%').padding(16).backgroundColor('#F6F7F2')
+          Button(task.status === 'completed' ? '✓' : task.status === 'in_progress' ? '◐' : '○')
+            .width(30).height(44).padding(0).fontSize(18).fontColor(task.status === 'completed' ? UiTheme.primary : '#999999')
+            .backgroundColor(Color.Transparent).enabled(!this.thinking).accessibilityText(`切换任务完成状态：${task.title}`)
+            .interactive().onClick(() => this.toggleTask(task.id))
+          Column({ space: 4 }) {
+            Text(task.title).fontSize(13).fontColor('#404040').width('100%')
+            Text(task.detail || (task.status === 'completed' ? '已完成' : task.status === 'in_progress' ? '进行中' : '待处理'))
+              .fontSize(10).fontColor('#888888').maxLines(3).width('100%')
+            Text('让 Agent 继续 →').fontSize(11).fontColor(UiTheme.primary).padding({ top: 5, bottom: 5 })
+              .enabled(!this.thinking).interactive().onClick(() => this.sendMessage(`请继续处理任务「${task.title}」，详情：${task.detail || '请根据对话补充'}。将实际进展同步到任务面板。`))
+          }.alignItems(HorizontalAlign.Start).layoutWeight(1)
+        }.width('100%').padding({ top: 4, bottom: 4 })
+      }, (task: WorkspaceTask) => `${this.activeSession}-${task.id}-${task.title}-${task.status}-${task.detail}`)
+      Button(this.workspace.tasks.length > 0 && this.completedTasks() < this.workspace.tasks.length ? '推进下一步' : '生成总结报告')
+        .width('100%').height(44).fontSize(13).fontColor(UiTheme.onPrimary).backgroundColor(UiTheme.primary).borderRadius(9)
+        .enabled(!this.thinking).interactive().onClick(() => this.advanceTask())
+      Text('产物与记忆').fontSize(12).fontWeight(FontWeight.Medium).fontColor(UiTheme.muted).width('100%').margin({ top: 4 })
+      Text(this.workspace.summary || '对话中的目标、进展和产物会保存在这里。').fontSize(12).fontColor('#505050')
+        .lineHeight(19).copyOption(CopyOptions.InApp).width('100%').padding(12).backgroundColor(UiTheme.surface).borderRadius(10)
+      ForEach(this.workspace.artifacts, (item: WorkspaceArtifact) => {
+        Column({ space: 6 }) {
+          Text(`▤ ${item.title}`).fontSize(13).fontColor(UiTheme.primary).width('100%')
+          Text(item.content.replace(/[#*`]/g, '').slice(0, 120)).fontSize(11).fontColor(UiTheme.muted).maxLines(3).width('100%')
+          Text('查看并复制 →').fontSize(11).fontColor(UiTheme.primary)
+        }.width('100%').padding(12).alignItems(HorizontalAlign.Start).backgroundColor(UiTheme.surface).borderRadius(10)
+          .interactive().onClick(() => this.showArtifact(item))
+      }, (item: WorkspaceArtifact) => `${this.activeSession}-${item.id}-${item.title}-${item.content}`)
+    }.width('100%').padding(16).alignItems(HorizontalAlign.Start)
+    }.width(this.panelWidth('right')).height('100%').backgroundColor(UiTheme.background).align(Alignment.TopStart).scrollBar(BarState.Auto)
+      .transition(TransitionEffect.OPACITY.animation({ duration: 180 }))
+      .bindSheet($$this.artifactVisible, this.ArtifactSheet(), { height: '80%', width: 680,
+        preferType: SheetType.CENTER, showClose: false, dragBar: false })
   }
 
   build() {
     Row() {
-      Column() {
-        if (this.isLeftPanelVisible) {
-        Column() {
-        Row({ space: 9 }) { Text('C').fontSize(17).fontWeight(FontWeight.Bold).fontColor('#151614').width(32).height(32).textAlign(TextAlign.Center).padding({ top: 6 }).backgroundColor('#D4F56A').borderRadius(9); Text('CampusPilot').fontSize(16).fontWeight(FontWeight.Medium).fontColor('#F5F5F0'); Blank(); Text('‹').fontSize(24).fontColor('#B5B6B0').width(24).height(32).textAlign(TextAlign.Center).padding({ top: 1 }).onClick(() => this.toggleLeftPanel()) }.width('100%').margin({ bottom: 20 })
-        Button('＋  新建对话').width('100%').height(42).fontSize(14).fontWeight(FontWeight.Medium).fontColor('#151614').backgroundColor('#D4F56A').borderRadius(10).onClick(() => this.createChat())
-        Row({ space: 7 }) { Text('⌕').fontSize(17).fontColor('#AFB0AB'); Text('搜索对话和记忆').fontSize(12).fontColor('#8B8C88') }.width('100%').height(38).padding({ left: 10 }).margin({ top: 12, bottom: 12 }).backgroundColor('#292A27').borderRadius(9)
-        Column() {
-          Scroll() {
-            Column() {
-            Row() { Text('工作区').fontSize(11).fontWeight(FontWeight.Medium).fontColor('#80817D'); Blank(); Text('⌃').fontSize(13).fontColor('#9B9C96').rotate({ angle: this.sideExpanded ? 0 : 180 }) }.width('100%').height(28).padding({ left: 2, right: 7 }).onClick(() => this.toggleWorkspace())
-            if (this.sideExpanded) {
-              ForEach(FEATURE_CATALOG, (feature: FeatureDefinition) => {
-                Row({ space: 10 }) { Text(feature.icon).fontSize(16).fontColor(this.activeFeature === feature.id ? '#D4F56A' : '#A5A6A1').width(20).textAlign(TextAlign.Center); Text(feature.name).fontSize(13).fontColor(this.activeFeature === feature.id ? '#F5F5F0' : '#C7C8C3').fontWeight(this.activeFeature === feature.id ? FontWeight.Medium : FontWeight.Regular).layoutWeight(1) }
-                .width('100%').height(40).padding({ left: 8, right: 6 }).margin({ bottom: 2 }).backgroundColor(this.activeFeature === feature.id ? '#30312D' : '#1D1E1B').borderRadius(8).onClick(() => this.chooseFeature(feature))
-              }, (feature: FeatureDefinition) => feature.id)
-            }
-            }.width('100%').justifyContent(FlexAlign.Start)
-          }.height(this.sideExpanded ? '55%' : 28).width('100%').align(Alignment.TopStart).scrollBar(BarState.Auto)
-        Row() { Text('最近对话').fontSize(11).fontWeight(FontWeight.Medium).fontColor('#80817D'); Blank(); Text('⌃').fontSize(13).fontColor('#9B9C96').rotate({ angle: this.recentsExpanded ? 0 : 180 }) }.width('100%').height(28).padding({ left: 2, right: 7 }).margin({ top: 10 }).onClick(() => this.toggleRecents())
-          Scroll() {
-            Column() {
-              ForEach(this.sessions, (session: SessionSummary) => {
-                Row({ space: 3 }) {
-                  Column({ space: 4 }) {
-                    Text(session.title).fontSize(12).fontColor(this.activeSession === session.id ? '#F0F0E9' : '#B9BBB4')
-                      .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
-                    Text(this.sessionTime(session.updatedAt)).fontSize(10).fontColor('#82877D').width('100%')
-                  }.layoutWeight(1).height(54).justifyContent(FlexAlign.Center).alignItems(HorizontalAlign.Start)
-                    .accessibilityText(`历史对话：${session.title}，最近消息 ${this.sessionTime(session.updatedAt)}`)
-                    .onClick(() => this.openSession(session.id))
-                  Button({ type: ButtonType.Normal }) {
-                    Image($r('app.media.ic_more_horizontal')).width(20).height(20)
-                  }.width(32).height(44).padding(0).borderRadius(8).backgroundColor('#34372F')
-                    .accessibilityText(`会话操作：${session.title}`)
-                    .bindMenu([{ value: '删除会话', action: () => this.confirmDeleteSession(session.id) }])
-                }.width('100%').padding({ left: 9, right: 4 }).margin({ bottom: 3 })
-                  .backgroundColor(this.activeSession === session.id ? '#292A27' : '#1D1E1B').borderRadius(7)
-              }, (session: SessionSummary) => `${session.id}-${session.title}-${session.updatedAt}`)
-            }.width('100%').justifyContent(FlexAlign.Start)
-          }.height(this.recentsExpanded ? 'calc(45% - 38vp)' : 0).width('100%')
-            .align(Alignment.TopStart).scrollBar(BarState.Auto).clip(true)
-            .opacity(this.recentsExpanded ? 1 : 0)
-          Blank().layoutWeight(1)
-        }.layoutWeight(1).width('100%').justifyContent(FlexAlign.Start)
-        Text(this.apiConfigured ? '●  外部模型已配置' : '●  尚未连接外部模型').fontSize(11).fontColor('#8B8C88').width('100%').padding({ top: 9, bottom: 4 })
-        }.width('100%').height('100%').padding(14)
-        } else {
-          Column({ space: 14 }) {
-            Text('›').fontSize(26).fontColor('#D4F56A').width(32).height(38).textAlign(TextAlign.Center).padding({ top: 3 }).backgroundColor('#30312D').borderRadius(9).onClick(() => this.toggleLeftPanel())
-            Text('C').fontSize(14).fontWeight(FontWeight.Bold).fontColor('#151614').width(28).height(28).textAlign(TextAlign.Center).padding({ top: 4 }).backgroundColor('#D4F56A').borderRadius(8)
-          }.width('100%').height('100%').alignItems(HorizontalAlign.Center).padding({ top: 14 })
-        }
-      }.width(this.isLeftPanelVisible ? 216 : 48).height('100%').backgroundColor('#1D1E1B')
+      this.SidebarContent()
+      if (this.isLeftPanelVisible) { this.ResizeHandle('left') }
 
       Column() {
         Row() {
-          Column({ space: 3 }) { Text(this.selectedFeature().name).fontSize(18).fontWeight(FontWeight.Medium).fontColor('#242521'); Text(this.selectedFeature().description).fontSize(11).fontColor('#85867E') }.alignItems(HorizontalAlign.Start)
-          Blank()
-          Text('＋ 上下文').fontSize(12).fontColor('#575951')
-            .padding({ left: 10, right: 10, top: 8, bottom: 8 }).backgroundColor('#EFEFEA').borderRadius(8)
+          Column({ space: 3 }) {
+            Text(this.selectedFeature().name).fontSize(18).fontWeight(FontWeight.Medium).fontColor(UiTheme.text)
+              .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+            Text(this.selectedFeature().description).fontSize(11).fontColor('#888888').maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
+          }.alignItems(HorizontalAlign.Start).layoutWeight(1).margin({ right: 10 })
+          if (this.activeFeature !== 'trash') {
+          Text('＋ 上下文').fontSize(12).fontColor('#505050')
+            .padding({ left: 10, right: 10, top: 8, bottom: 8 }).backgroundColor(UiTheme.raised).borderRadius(8)
             .accessibilityText(this.contextPickerVisible ? '关闭课程资料选择' : '为当前对话添加课程资料')
-            .onClick(() => this.toggleContextPicker())
-          Text(this.isTaskPanelVisible ? '☷' : '☰').fontSize(18).fontColor('#55564F').margin({ left: 12 }).padding(7).onClick(() => this.toggleTaskPanel())
-        }.width('100%').height(68).padding({ left: 26, right: 20 }).backgroundColor('#FBFBF8').border({ width: { bottom: 1 }, color: '#E5E5DF' })
+            .interactive().onClick(() => this.toggleContextPicker())
+          if (!this.isWelcomePage) {
+            Text(this.isTaskPanelVisible ? '☷' : '☰').fontSize(18).fontColor('#505050').margin({ left: 12 }).padding(7).interactive().onClick(() => this.toggleTaskPanel())
+          }
+          }
+        }.width('100%').height(68).padding({ left: 26, right: 20 }).backgroundColor(UiTheme.background).border({ width: { bottom: 1 }, color: UiTheme.border })
+        if (this.isWelcomePage) {
+          Scroll() { this.WelcomeContent() }.layoutWeight(1).width('100%').align(Alignment.Center).scrollBar(BarState.Off)
+        } else {
         Scroll(this.chatScroller) {
           Column({ space: 15 }) {
-            if (this.activeFeature === 'home') { this.DashboardContent() }
+            if (this.activeFeature === 'trash') { this.TrashContent() }
             else if (this.activeFeature === 'career') { this.CareerContent() }
             else if (this.activeFeature === 'schedule') { this.ScheduleContent() }
             else if (this.activeFeature === 'budget') { this.BudgetContent() }
             else if (this.activeFeature === 'forms' || this.activeFeature === 'focus' || this.activeFeature === 'study') { this.ModuleContent() }
-            else { this.PlaceholderContent() }
+            else if (this.activeFeature !== 'home') { this.PlaceholderContent() }
+            if (this.activeFeature !== 'trash') { this.WorkspaceAssistantContent() }
             if (this.notice.length > 0) {
-              Text(this.notice).fontSize(12).fontColor('#88551A').lineHeight(19).width('100%')
-                .padding(10).backgroundColor('#FFF6E8').borderRadius(9)
+              Text(this.notice).fontSize(12).fontColor('#666666').lineHeight(19).width('100%')
+                .padding(10).backgroundColor(UiTheme.raised).borderRadius(9).transition(TransitionEffect.OPACITY.animation({ duration: 160 }))
             }
             if (this.storageNotice.length > 0) {
-              Text(this.storageNotice).fontSize(12).fontColor('#88551A').width('100%')
-                .padding(10).backgroundColor('#FFF6E8').borderRadius(9)
+              Text(this.storageNotice).fontSize(12).fontColor('#666666').width('100%')
+                .padding(10).backgroundColor(UiTheme.raised).borderRadius(9).transition(TransitionEffect.OPACITY.animation({ duration: 160 }))
             }
-            if (this.apiSettingsVisible) { this.ApiSettingsContent() }
-            Row({ space: 8 }) { Text('✦').fontSize(13).fontColor('#356B58'); Text('回答会结合当前对话和你主动加入的课程资料。').fontSize(12).fontColor('#596159') }.width('100%').padding(11).backgroundColor('#EFF6F0').borderRadius(10)
+            if (this.activeFeature !== 'trash') {
+              Row({ space: 8 }) { Text('✦').fontSize(13).fontColor(UiTheme.primary); Text('回答会结合当前对话和你主动加入的课程资料。').fontSize(12).fontColor(UiTheme.secondary) }.width('100%').padding(11).backgroundColor(UiTheme.raised).borderRadius(10)
+            }
             ForEach(this.messages, (message: AgentMessage, index: number) => {
               Row() {
                 Column({ space: 5 }) {
@@ -1014,35 +1624,37 @@ struct Index {
                       Image(`file://${attachment.path}`).width('100%').height(160).objectFit(ImageFit.Contain).borderRadius(8)
                     }
                     Text(`${attachment.kind === 'image' ? '▧' : '▤'} ${attachment.name}${attachment.truncated ? ' · 部分内容' : ''}`)
-                      .fontSize(12).fontColor('#5C7160').maxLines(2).width('100%')
+                      .fontSize(12).fontColor('#666666').maxLines(2).width('100%')
                   }, (attachment: ChatAttachment) => attachment.id)
                   if (message.role === 'agent') {
                     AgentAnswer({ message: message, expanded: this.expandedThoughts.includes(`${this.activeSession}-${index}`),
                       onToggle: () => this.toggleThought(index) })
                   } else {
-                    Text(message.content).fontSize(15).fontColor('#292A27').lineHeight(23).copyOption(CopyOptions.InApp)
+                    Text(message.content).fontSize(15).fontColor(UiTheme.text).lineHeight(23).copyOption(CopyOptions.InApp)
                   }
-                  Text(message.meta).fontSize(10).fontColor('#9A9B94')
+                  Text(message.meta).fontSize(10).fontColor('#999999')
                   ForEach(message.sources || [], (source: SourceCitation) => {
                     Column({ space: 5 }) {
-                      Text(`[${source.number}] ${source.title} · ${source.location}`).fontSize(11).fontColor('#356B58').width('100%')
-                        .accessibilityText(`来源 ${source.number} ${source.title} ${source.location}`).onClick(() => this.showCitation(source))
+                      Text(`[${source.number}] ${source.title} · ${source.location}`).fontSize(11).fontColor(UiTheme.primary).width('100%')
+                        .accessibilityText(`来源 ${source.number} ${source.title} ${source.location}`).interactive().onClick(() => this.showCitation(source))
                       if (this.expandedSourceId === source.chunkId) {
-                        Text(source.excerpt).fontSize(12).fontColor('#4E514B').lineHeight(19).copyOption(CopyOptions.InApp).width('100%').onClick(() => this.showCitation(source))
+                        Text(source.excerpt).fontSize(12).fontColor(UiTheme.secondary).lineHeight(19).copyOption(CopyOptions.InApp).width('100%').interactive().onClick(() => this.showCitation(source))
                       }
-                    }.width('100%').padding(8).backgroundColor('#EFF6F0').borderRadius(8)
+                    }.width('100%').padding(8).backgroundColor(UiTheme.raised).borderRadius(8)
                   }, (source: SourceCitation) => source.chunkId)
                   if (message.role === 'agent' && message.content.length > 0 && message.status !== 'loading') {
-                    Button(this.speaking ? '停止朗读' : '朗读回答').height(44).fontSize(11).fontColor('#356B58').backgroundColor('#EFF6F0')
-                      .onClick(() => this.toggleSpeech(message.content))
+                    Button(this.speaking ? '停止朗读' : '朗读回答').height(44).fontSize(11).fontColor(UiTheme.primary).backgroundColor(UiTheme.raised)
+                      .interactive().onClick(() => this.toggleSpeech(message.content))
                   }
-                }.alignItems(HorizontalAlign.Start).width('80%').padding(13).backgroundColor(message.role === 'agent' ? '#FFFFFF' : '#E9F3EB').borderRadius(13)
+                }.alignItems(HorizontalAlign.Start).width('80%').padding(13).backgroundColor(message.role === 'agent' ? UiTheme.agentBubble : UiTheme.userBubble).borderRadius(13)
               }.width('100%').justifyContent(message.role === 'agent' ? FlexAlign.Start : FlexAlign.End)
             // ForEach reuses nodes with unchanged keys. Replacing an interface object alone
             // does not refresh its captured fields, so include the reply revision in its key.
             }, (message: AgentMessage, index: number) => `${this.activeSession}-${message.role}-${index}-${message.renderRevision || 0}`)
           }.width('100%').padding({ left: 26, right: 26, top: 2, bottom: 20 })
-        }.layoutWeight(1).width('100%').scrollBar(BarState.Off)
+        }.layoutWeight(1).width('100%').align(Alignment.TopStart).scrollBar(BarState.Off)
+        }
+        if (this.activeFeature !== 'trash') {
         Column({ space: 7 }) {
           if (this.draftAttachments.length > 0) {
             Scroll() {
@@ -1050,55 +1662,68 @@ struct Index {
                 ForEach(this.draftAttachments, (attachment: ChatAttachment) => {
                   Row({ space: 7 }) {
                     if (attachment.kind === 'image') { Image(`file://${attachment.path}`).width(44).height(44).objectFit(ImageFit.Cover).borderRadius(6) }
-                    else { Text('▤').fontSize(22).fontColor('#58735E') }
+                    else { Text('▤').fontSize(22).fontColor('#666666') }
                     Column({ space: 3 }) {
-                      Text(attachment.name).fontSize(11).fontColor('#46574A').maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).width(130)
-                      Text(`${Math.max(1, Math.round(attachment.size / 1024))} KB${attachment.truncated ? ' · 部分内容' : ''}`).fontSize(10).fontColor('#8A968B')
+                      Text(attachment.name).fontSize(11).fontColor('#505050').maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).width(130)
+                      Text(`${Math.max(1, Math.round(attachment.size / 1024))} KB${attachment.truncated ? ' · 部分内容' : ''}`).fontSize(10).fontColor('#999999')
                     }.alignItems(HorizontalAlign.Start)
-                    Button('×').fontSize(18).width(30).height(40).backgroundColor(Color.Transparent).fontColor('#738174')
-                      .accessibilityText(`移除附件 ${attachment.name}`).onClick(() => this.removeAttachment(attachment.id))
-                  }.padding(7).backgroundColor('#F0F5EF').borderRadius(9)
+                    Button('×').fontSize(18).width(30).height(40).backgroundColor(Color.Transparent).fontColor('#777777')
+                      .accessibilityText(`移除附件 ${attachment.name}`).interactive().onClick(() => this.removeAttachment(attachment.id))
+                  }.padding(7).backgroundColor(UiTheme.raised).borderRadius(9)
                 }, (attachment: ChatAttachment) => attachment.id)
               }
             }.scrollable(ScrollDirection.Horizontal).width('100%').scrollBar(BarState.Off)
           }
           if (this.attachmentBusy || this.voiceBusy || this.recording) {
             Text(this.attachmentBusy ? '正在读取附件…' : this.recording ? '● 正在聆听，再点麦克风结束' : '正在处理语音…')
-              .fontSize(11).fontColor(this.recording ? '#B35443' : '#66816B').width('100%')
+              .fontSize(11).fontColor(this.recording ? '#666666' : '#777777').width('100%')
           }
           if (this.selectedContext.length > 0) {
             Row({ space: 5 }) {
-              Text(`当前上下文 · ${this.selectedContext.length} 条资料`).fontSize(11).fontColor('#356B58').layoutWeight(1)
+              Text(`当前上下文 · ${this.selectedContext.length} 条资料`).fontSize(11).fontColor(UiTheme.primary).layoutWeight(1)
               ForEach(this.selectedContext, (source: SourceCitation) => {
-                Button(`［${source.number}］${source.course} ×`).fontSize(10).height(38).fontColor('#356B58')
-                  .backgroundColor('#EFF6F0').onClick(() => this.toggleContextSource(source))
+                Button(`［${source.number}］${source.course} ×`).fontSize(10).height(38).fontColor(UiTheme.primary)
+                  .backgroundColor(UiTheme.raised).interactive().onClick(() => this.toggleContextSource(source))
               }, (source: SourceCitation) => source.chunkId)
             }.width('100%')
           }
           Row({ space: 10 }) {
-            Text('＋').fontSize(19).fontColor('#4F514B').width(26).height(44).textAlign(TextAlign.Center)
+            Text('＋').fontSize(19).fontColor('#505050').width(26).height(44).textAlign(TextAlign.Center)
               .accessibilityText('导入文件或图片').enabled(!this.thinking && !this.recording && !this.voiceBusy && !this.attachmentBusy)
-              .bindMenu([{ value: '导入文件', action: () => this.pickAttachments(false) }, { value: '选择图片', action: () => this.pickAttachments(true) }])
+              .interactive().bindMenu([{ value: '导入文件', action: () => this.pickAttachments(false) }, { value: '选择图片', action: () => this.pickAttachments(true) }])
             Button({ type: ButtonType.Normal }) {
-              if (this.recording) { Text('■').fontSize(16).fontColor('#B35443') }
-              else if (this.voiceBusy) { LoadingProgress().width(20).height(20).color('#66816B') }
+              if (this.recording) { Text('■').fontSize(16).fontColor('#666666') }
+              else if (this.voiceBusy) { LoadingProgress().width(20).height(20).color('#777777') }
               else { Image($r('app.media.ic_microphone')).width(23).height(23) }
             }.width(32).height(44).backgroundColor(Color.Transparent).borderRadius(6)
-              .accessibilityText(this.recording ? '结束录音' : '麦克风语音识别').onClick(() => this.toggleVoice())
-            TextInput({ text: this.inputText, placeholder: '向 CampusPilot 描述你的下一步…' }).layoutWeight(1).height(44).fontSize(14).backgroundColor('#F2F2ED').borderRadius(10).padding({ left: 12, right: 8 }).onChange((value: string) => this.inputText = value).onSubmit(() => this.sendMessage(this.inputText))
+              .accessibilityText(this.recording ? '结束录音' : '麦克风语音识别').interactive().onClick(() => this.toggleVoice())
+            TextInput({ text: this.inputText, placeholder: this.activeFeature === 'home' ? '向 CampusPilot 描述你的下一步…' : `在${this.selectedFeature().name}中，想做些什么…` }).id('chat-input').layoutWeight(1).height(44).fontSize(14).backgroundColor(UiTheme.raised).borderRadius(10).padding({ left: 12, right: 8 }).caretColor(UiTheme.primary).selectedBackgroundColor('#DDDDDD').inputFeedback().onChange((value: string) => this.inputText = value).onSubmit(() => this.sendMessage(this.inputText))
             Button({ type: ButtonType.Circle }) {
-              Text('➤').fontSize(18).fontColor('#F9FAF6').rotate({ angle: -45 })
-            }.width(42).height(42).backgroundColor('#356B58').onClick(() => this.sendMessage(this.inputText))
-            if (this.thinking) { Text('停止').fontSize(12).fontColor('#356B58').height(44).padding({ left: 6, right: 6 }).onClick(() => this.stopReply()) }
-          }.width('100%').padding(8).backgroundColor('#FFFFFF').borderRadius(14).border({ width: 1, color: '#E2E3DC' })
+              Text('➤').fontSize(18).fontColor(UiTheme.onPrimary).rotate({ angle: -45 })
+            }.id('chat-send').width(42).height(42).backgroundColor(UiTheme.primary).interactive().onClick(() => this.sendMessage(this.inputText))
+            if (this.thinking) { Text('停止').fontSize(12).fontColor(UiTheme.primary).height(44).padding({ left: 6, right: 6 }).interactive().onClick(() => this.stopReply()) }
+          }.width('100%').padding(8).backgroundColor(UiTheme.surface).borderRadius(14).border({ width: 1, color: UiTheme.border })
           Text(this.apiConfigured ? `● 已配置 ${IntegrationService.agent.name} · 管理 API` : '配置外部模型 API · 当前尚未连接模型')
-            .fontSize(10).fontColor(this.apiConfigured ? '#356B58' : '#777A72').width('100%').textAlign(TextAlign.Center)
-            .height(24).onClick(() => this.toggleApiSettings())
-        }.width('100%').padding({ left: 26, right: 26, top: 10, bottom: 14 }).backgroundColor('#FBFBF8')
-      }.layoutWeight(1).height('100%').backgroundColor('#FBFBF8')
+            .fontSize(10).fontColor(this.apiConfigured ? UiTheme.primary : UiTheme.muted).width('100%').textAlign(TextAlign.Center)
+            .id('api-settings-open').height(24).interactive().onClick(() => this.toggleApiSettings())
+        }.width('100%').padding({ left: 26, right: 26, top: 10, bottom: 14 }).backgroundColor(UiTheme.background)
+        } else {
+          Row({ space: 12 }) {
+            Text(this.activeSession ? '回收站中的会话为只读状态' : '已删除的会话和附件会一直保留，直到永久删除。').fontSize(12).fontColor(UiTheme.muted).layoutWeight(1)
+            if (this.activeSession) {
+              Button('恢复此会话').height(42).fontSize(13).backgroundColor(UiTheme.primary).fontColor(UiTheme.surface)
+                .interactive().onClick(() => this.restoreTrashSession(this.activeSession))
+            }
+          }.width('100%').padding(20).backgroundColor(UiTheme.raised)
+        }
+      }.layoutWeight(1).height('100%').backgroundColor(UiTheme.background)
+        .bindSheet($$this.apiSettingsVisible, this.ApiSettingsSheet(), { height: '78%', width: 620,
+          preferType: SheetType.CENTER, showClose: false, dragBar: false,
+          onDisappear: () => { this.apiSettingsVisible = false } })
 
-      if (this.isTaskPanelVisible) { Divider().vertical(true).color('#E4E5DE').strokeWidth(1); this.TaskPanel() }
-    }.width('100%').height('100%').backgroundColor('#FBFBF8')
+      if (this.isTaskPanelVisible && !this.isWelcomePage && this.activeFeature !== 'trash') { this.ResizeHandle('right'); this.TaskPanel() }
+    }.width('100%').height('100%').backgroundColor(UiTheme.background)
+      .onAreaChange((_oldArea: Area, newArea: Area) => { this.viewportWidth = Number.parseFloat(`${newArea.width}`) || 1280 })
       .bindSheet($$this.contextPickerVisible, this.ContextSheet(), { height: '80%', width: 680,
         preferType: SheetType.CENTER, showClose: false, dragBar: false,
         onDisappear: () => { this.contextPickerVisible = false; this.searchSerial++; this.searchBusy = false } })

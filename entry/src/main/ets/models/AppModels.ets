@@ -20,6 +20,7 @@ export interface FeatureDefinition {
   name: string
   description: string
   category: string
+  prompt?: string
 }
 
 export interface ActionItem {

@@ -1,3 +1,4 @@
+import { UiTheme } from '../config/UiTheme'
 import { AgentMessage } from '../models/AppModels'
 import { MarkdownParser } from '../services/MarkdownParser'
 import { MarkdownContent } from './MarkdownContent'
@@ -30,6 +31,7 @@ export struct AgentAnswer {
     if (!this.generating()) return '思路摘要'
     if (this.message.phase === 'retrieving') return '正在检索资料'
     if (this.message.phase === 'connecting') return '正在连接模型'
+    if (this.message.phase === 'updating') return '正在操作工作区'
     if (this.message.phase === 'analyzing' || MarkdownParser.answer(this.message.content).summarizing) return '正在思考'
     return '正在生成回答'
   }
@@ -39,24 +41,27 @@ export struct AgentAnswer {
       if (this.message.thinkingStartedAt !== undefined || MarkdownParser.answer(this.message.content).summary.length > 0) {
         Column({ space: 8 }) {
           Row({ space: 7 }) {
-            if (this.generating()) { LoadingProgress().width(15).height(15).color('#66836E') }
-            else { Text(this.message.status === 'error' ? '!' : this.message.status === 'stopped' ? '◌' : '✓').fontSize(13).fontColor('#66836E') }
-            Text(this.label()).fontSize(12).fontColor('#68776B')
-            if (this.message.thinkingStartedAt !== undefined) { Text(`用时 ${this.elapsedSeconds} 秒`).fontSize(11).fontColor('#929D92') }
+            if (this.generating()) { LoadingProgress().width(15).height(15).color('#777777') }
+            else { Text(this.message.status === 'error' ? '!' : this.message.status === 'stopped' ? '◌' : '✓').fontSize(13).fontColor('#777777') }
+            Text(this.label()).fontSize(12).fontColor(UiTheme.secondary)
+            if (this.message.thinkingStartedAt !== undefined) { Text(`用时 ${this.elapsedSeconds} 秒`).fontSize(11).fontColor('#999999') }
             Blank()
-            Text(this.expanded ? '⌃' : '⌄').fontSize(13).fontColor('#7F8B7F')
+            Text(this.expanded ? '⌃' : '⌄').fontSize(13).fontColor('#888888')
           }.width('100%').height(34).accessibilityText(`${this.label()}，${this.expanded ? '收起' : '展开'}思路摘要`)
-            .onClick(() => this.onToggle())
+            .hoverEffect(HoverEffect.Highlight)
+            .stateStyles({ normal: { .opacity(1) }, pressed: { .opacity(0.65) } })
+            .animation({ duration: 140, curve: Curve.EaseOut })
+            .onClick(() => this.getUIContext().animateTo({ duration: 180, curve: Curve.EaseInOut }, () => this.onToggle()))
           if (this.expanded) {
             if (MarkdownParser.answer(this.message.content).summary.length > 0) {
               MarkdownContent({ content: MarkdownParser.answer(this.message.content).summary })
             } else {
               Text(this.generating() ? '模型正在处理请求，返回思路摘要后将在这里显示。' : '本次回答未提供思路摘要。')
-                .fontSize(12).fontColor('#859080').lineHeight(20)
+                .fontSize(12).fontColor('#888888').lineHeight(20)
             }
           }
         }.width('100%').padding({ left: 10, right: 10, bottom: this.expanded ? 10 : 0 })
-          .backgroundColor('#F4F7F1').borderRadius(8)
+          .backgroundColor(UiTheme.raised).borderRadius(8)
       }
       if (this.message.status !== 'loading' && MarkdownParser.answer(this.message.content).body.trim().length > 0) {
         MarkdownContent({ content: MarkdownParser.answer(this.message.content).body })

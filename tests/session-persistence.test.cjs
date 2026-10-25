@@ -10,6 +10,8 @@ const ts = require(process.argv[2] || 'typescript');
 const source = fs.readFileSync(path.join(__dirname, '../entry/src/main/ets/services/SessionService.ets'), 'utf8');
 const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS,
   target: ts.ScriptTarget.ES2020 } }).outputText;
+const catalogExports = {};
+vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(__dirname, '../entry/src/main/ets/config/FeatureCatalog.ets'), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, { exports: catalogExports });
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'campuspilot-history-'));
 const archivePath = path.join(directory, 'chat_sessions.json');
 let failRename = false;
@@ -28,6 +30,7 @@ function boot() {
   const exports = {};
   vm.runInNewContext(compiled, { exports, setTimeout, clearTimeout, Date: TestDate,
     require: name => {
+      if (name === '../config/FeatureCatalog') return catalogExports;
       if (name === '@kit.CoreFileKit') return { fileIo: bridge };
       if (name === '@kit.ArkTS') return { util: { generateRandomUUID: crypto.randomUUID } };
       throw Error(`Unexpected runtime dependency: ${name}`);
@@ -53,6 +56,17 @@ try {
   const citation = { number: 1, chunkId: 'chunk', sourceId: 'source', title: '资料', location: 'p1',
     course: '课程', excerpt: '引用正文', score: 1 };
   service.saveDetails(first.id, [citation], 2);
+  const panel = { goal: '复习计划', summary: '用户确认目标', tasks: [{ id: 'study', title: '复习图算法', detail: '周三', status: 'pending' }],
+    artifacts: [{ id: 'notes', title: '学习笔记', content: '## 图遍历' }], updatedAt: now };
+  const panelTime = service.get(first.id).updatedAt;
+  service.saveWorkspace(first.id, 'home', panel);
+  const sidebar = { workspaceSectionExpanded: true, recentSectionExpanded: false, expandedWorkspaceIds: ['home'],
+    expandedHistoryIds: ['home'], showAllRecent: true, panelVisible: false };
+  service.saveSidebar(sidebar);
+  sidebar.expandedWorkspaceIds.push('external mutation');
+  assert.deepEqual(Array.from(service.sidebar().expandedWorkspaceIds), ['home'], 'sidebar preferences must be copied');
+  assert.equal(service.get(first.id).updatedAt, panelTime, 'panel edits must not reorder chat history');
+  panel.goal = 'outside mutation';
   const attachmentDir = path.join(directory, 'chat_attachments');
   fs.mkdirSync(attachmentDir);
   const attachmentPath = `${directory}/chat_attachments/delete-test.txt`;
@@ -69,6 +83,11 @@ try {
   assert.equal(service.current().id, first.id, 'active chat must survive process restart');
   assert.equal(service.get(first.id).messages.length, 126, 'history must not silently truncate at 100');
   assert.equal(service.get(first.id).progress, 2);
+  assert.equal(service.get(first.id).workspace.goal, '复习计划');
+  assert.equal(service.sidebar().recentSectionExpanded, false);
+  assert.equal(service.sidebar().panelVisible, false, 'sidebar visibility must survive restart');
+  assert.equal(service.get(first.id).workspace.artifacts[0].content, '## 图遍历');
+  assert.equal(service.get(second.id).workspace, undefined, 'panel must stay isolated per conversation');
   assert.equal(service.get(first.id).context[0].excerpt, '引用正文');
   assert.equal(service.get(first.id).messages[125].status, 'stopped', 'interrupted streams must settle');
   assert.equal(service.get(first.id).messages[125].thinkingStartedAt, messages[125].thinkingStartedAt);
@@ -79,6 +98,9 @@ try {
   const order = service.list().map(s => s.id).join(',');
   const firstUpdatedAt = service.get(first.id).updatedAt;
   now += 60000;
+  service.saveWorkspace(first.id, 'study', service.get(first.id).workspace);
+  assert.equal(service.get(first.id).featureId, 'study', 'agent workspace switch must persist on the same conversation');
+  assert.equal(service.get(first.id).updatedAt, firstUpdatedAt);
   service.activate(second.id);
   service.saveMessages(first.id, service.loadMessages(first.id));
   service.saveDetails(first.id, service.get(first.id).context, 2);
@@ -106,6 +128,7 @@ try {
   assert.equal(fs.existsSync(attachmentPath), false, 'delete owned attachment copies');
   service = boot();
   assert.equal(service.get(second.id), undefined, 'deleted conversations must stay deleted after restarting');
+  assert.deepEqual(Array.from(service.sidebar().expandedWorkspaceIds), ['home'], 'deleting a conversation must keep folder preferences');
   fs.writeFileSync(archivePath, '{broken');
   service = boot();
   assert.equal(service.get(second.id), undefined, 'backup recovery must not resurrect deleted conversations');
@@ -113,12 +136,80 @@ try {
   assert.equal(service.current(), undefined, 'deleting the last conversation must clear the active id');
   service = boot();
   assert.equal(service.list().length, 0);
+  assert.equal(service.workspaces().length, 10, 'old archives must migrate to defaults plus protected trash');
+  assert.equal(service.deleteWorkspace('home'), false);
+  assert.equal(service.deleteWorkspace('trash'), false);
+  assert.throws(() => service.create('trash', 'invalid', []));
+  const custom = service.addWorkspace('毕业设计', '论文与课题进度', '你是毕业设计规划助手。');
+  assert.ok(custom.id.startsWith('workspace-'));
+  assert.throws(() => service.addWorkspace('毕业设计'));
+  const a = service.create(custom.id, '论文计划', [message('user', '完成论文')]);
+  const b = service.create(custom.id, '开题讨论', []);
+  const keptAttachment = `${directory}/chat_attachments/trash-keep.txt`;
+  fs.writeFileSync(keptAttachment, 'keep');
+  const withFile = message('user', '请保留附件');
+  withFile.attachments = [{ id: 'keep', name: 'test.txt', kind: 'document', path: keptAttachment, text: 'keep', size: 4 }];
+  service.saveMessages(a.id, [withFile]);
+  service.saveWorkspace(a.id, custom.id, { ...panel, goal: '论文计划' });
+  service.saveDetails(a.id, [citation], 2);
+  const beforeTrash = service.get(a.id);
+  const backupBeforeFailure = fs.readFileSync(`${archivePath}.bak`, 'utf8');
+  failRename = true;
+  assert.equal(service.deleteWorkspace(custom.id), false, 'failed bulk deletion must restore both registry and conversations');
+  assert.ok(service.workspaces().some(w => w.id === custom.id));
+  assert.equal(service.get(a.id).featureId, custom.id);
+  assert.equal(fs.readFileSync(`${archivePath}.bak`, 'utf8'), backupBeforeFailure, 'failed deletion must preserve the last recovery copy');
+  failRename = false;
+  assert.equal(service.deleteWorkspace(custom.id), true);
+  service = boot();
+  assert.ok(!service.workspaces().some(w => w.id === custom.id), 'removed workspaces must stay removed after restart');
+  for (const id of [a.id, b.id]) {
+    assert.equal(service.get(id).featureId, 'trash');
+    assert.equal(service.get(id).originFeatureId, custom.id);
+    assert.equal(service.get(id).originFeatureName, '毕业设计');
+    assert.equal(service.get(id).deletedAt, now);
+  }
+  assert.equal(service.get(a.id).updatedAt, beforeTrash.updatedAt, 'deletion time must not overwrite conversation time');
+  assert.equal(service.get(a.id).workspace.goal, '论文计划');
+  assert.equal(service.get(a.id).context.length, 1);
+  assert.ok(fs.existsSync(keptAttachment), 'workspace deletion must keep attachment files');
+  service.saveMessages(a.id, [message('user', 'stale callback')]);
+  service.saveDetails(a.id, [], 0);
+  service.saveWorkspace(a.id, 'home', panel);
+  assert.equal(service.get(a.id).messages[0].content, '请保留附件', 'trashed conversations must be read-only');
+  assert.equal(service.get(a.id).context.length, 1);
+  assert.equal(service.get(a.id).featureId, 'trash');
+  fs.writeFileSync(archivePath, '{broken');
+  service = boot();
+  assert.equal(service.get(a.id).featureId, 'trash', 'backup recovery must not undo workspace deletion');
+  assert.ok(!service.workspaces().some(w => w.id === custom.id));
+  assert.equal(service.restore(a.id), true);
+  assert.equal(service.get(a.id).featureId, 'home', 'deleted original workspace restores to assistant');
+  assert.equal(service.get(a.id).deletedAt, undefined);
+  assert.equal(service.get(a.id).updatedAt, beforeTrash.updatedAt);
+  assert.ok(fs.existsSync(keptAttachment));
+  assert.equal(service.trash(a.id), true);
+  assert.equal(service.restore(a.id), true);
+  assert.equal(service.get(a.id).featureId, 'home', 'individual deletion restores to existing original workspace');
+  assert.equal(service.trash(a.id), true);
+  assert.equal(service.remove(a.id), true);
+  assert.equal(fs.existsSync(keptAttachment), false, 'permanent deletion finally cleans orphan attachment copies');
+  const failedCount = service.workspaces().length;
+  failRename = true;
+  assert.equal(service.addWorkspace('保存失败测试'), undefined);
+  assert.equal(service.workspaces().length, failedCount);
+  failRename = false;
+  service.flush();
+  service.saveSidebar({ ...sidebar, leftWidth: 320, rightWidth: 350 });
+  service = boot();
+  assert.equal(service.sidebar().leftWidth, 320);
+  assert.equal(service.sidebar().rightWidth, 350);
   fs.writeFileSync(archivePath, '{broken');
   fs.writeFileSync(`${archivePath}.bak`, '{also broken');
   service = boot();
   service.create('home', 'temporary', []);
   assert.equal(fs.readFileSync(archivePath, 'utf8'), '{broken', 'unreadable originals must be preserved');
-  console.log('PASS: stable chronological order, unchanged-save timestamps, deletion and rollback, attachment cleanup, recovery without resurrection, full history and restart.');
+  console.log('PASS: history, workspace migration/creation, protected sections, transactional bulk trash, read-only archive, restore/fallback, attachment lifecycle, width persistence and restart.');
 } finally {
   // This directory is created exclusively for this test under the OS temporary directory.
   assert.equal(path.dirname(path.resolve(directory)), path.resolve(os.tmpdir()));
