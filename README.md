@@ -38,8 +38,8 @@
 ## 获取与运行
 
 ```powershell
-git clone https://github.com/ZRX-1001/huawei_project.git
-cd huawei_project
+git clone https://github.com/sugary-men/huawei-project.git
+cd huawei-project
 ```
 
 使用 DevEco Studio 打开项目根目录，完成 SDK、依赖同步，并在 Device Manager 中启动设备。连接真机时按本机环境配置调试与签名；当前仓库未提供个人签名材料。
