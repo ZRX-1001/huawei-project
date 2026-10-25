@@ -1,8 +1,11 @@
 import { common } from '@kit.AbilityKit'
 import { fileIo as fs } from '@kit.CoreFileKit'
 import { util } from '@kit.ArkTS'
-import { AgentMessage } from '../models/AppModels'
+import { AgentMessage, FeatureDefinition } from '../models/AppModels'
+import { FEATURE_CATALOG } from '../config/FeatureCatalog'
 import { SourceCitation } from '../models/RagModels'
+import { WorkspaceState } from '../models/WorkspaceModels'
+import { SidebarPreferences } from '../models/SidebarModels'
 
 export interface SessionSummary {
   id: string
@@ -10,9 +13,13 @@ export interface SessionSummary {
   featureId: string
   createdAt: number
   updatedAt: number
+  deletedAt?: number
+  originFeatureId?: string
+  originFeatureName?: string
 }
 
 export interface ChatSession extends SessionSummary {
+  workspace?: WorkspaceState
   messages: AgentMessage[]
   context: SourceCitation[]
   progress: number
@@ -22,6 +29,8 @@ interface SessionArchive {
   version: number
   activeSessionId: string
   sessions: ChatSession[]
+  sidebar?: SidebarPreferences
+  workspaces?: FeatureDefinition[]
 }
 
 export class SessionService {
@@ -91,10 +100,112 @@ export class SessionService {
     return SessionService.archive.sessions.slice().sort((a: ChatSession, b: ChatSession) =>
       b.updatedAt - a.updatedAt || b.createdAt - a.createdAt || a.id.localeCompare(b.id))
       .map((session: ChatSession): SessionSummary => ({ id: session.id, title: session.title,
-        featureId: session.featureId, createdAt: session.createdAt, updatedAt: session.updatedAt }))
+        featureId: session.featureId, createdAt: session.createdAt, updatedAt: session.updatedAt,
+        deletedAt: session.deletedAt, originFeatureId: session.originFeatureId, originFeatureName: session.originFeatureName }))
+  }
+
+  static workspaces(): FeatureDefinition[] {
+    const saved = SessionService.archive.workspaces
+    const items = Array.isArray(saved) ? saved.filter((item: FeatureDefinition) => item !== null &&
+      typeof item.id === 'string' && typeof item.name === 'string' && item.id !== 'home' && item.id !== 'trash')
+      : FEATURE_CATALOG.filter((item: FeatureDefinition) => item.id !== 'home')
+    const result: FeatureDefinition[] = [FEATURE_CATALOG[0]]
+    const seen = new Set<string>(['home', 'trash'])
+    items.forEach((item: FeatureDefinition) => {
+      if (seen.has(item.id) || !item.name.trim()) return
+      seen.add(item.id)
+      result.push({ id: item.id, name: item.name.slice(0, 40), description: typeof item.description === 'string' ? item.description.slice(0, 160) : '',
+        category: typeof item.category === 'string' ? item.category : '自定义', icon: typeof item.icon === 'string' ? item.icon : '▤',
+        prompt: typeof item.prompt === 'string' ? item.prompt.slice(0, 3000) : undefined })
+    })
+    result.push({ id: 'trash', name: '回收站', description: '恢复会话或永久删除', category: '保留', icon: '♲' })
+    return JSON.parse(JSON.stringify(result)) as FeatureDefinition[]
+  }
+
+  static addWorkspace(name: string, description: string = '', prompt: string = ''): FeatureDefinition | undefined {
+    const title = name.trim()
+    if (!title || title.length > 40 || description.length > 160 || prompt.length > 3000) throw new Error('请输入1–40字的分区名称，并缩短说明或提示词。')
+    const current = SessionService.workspaces()
+    if (current.length >= 30) throw new Error('最多保留30个工作区。')
+    if (current.some((item: FeatureDefinition) => item.name.toLocaleLowerCase() === title.toLocaleLowerCase())) throw new Error('已有同名工作区。')
+    const feature: FeatureDefinition = { id: `workspace-${util.generateRandomUUID()}`, name: title, description: description.trim(),
+      category: '自定义', icon: '▤', prompt: prompt.trim() }
+    const next = SessionService.copyArchive()
+    next.workspaces = current.filter((item: FeatureDefinition) => item.id !== 'trash').concat([feature])
+    return SessionService.commitArchive(next, false) ? feature : undefined
+  }
+
+  static deleteWorkspace(id: string): boolean {
+    if (id === 'home' || id === 'trash' || !SessionService.workspaces().some((item: FeatureDefinition) => item.id === id)) return false
+    const origin = SessionService.workspaces().find((item: FeatureDefinition) => item.id === id) as FeatureDefinition
+    const next = SessionService.copyArchive()
+    next.workspaces = SessionService.workspaces().filter((item: FeatureDefinition) => item.id !== id)
+    next.sessions.forEach((session: ChatSession) => {
+      if (session.featureId !== id) return
+      session.originFeatureId = id
+      session.originFeatureName = origin.name
+      session.deletedAt = Date.now()
+      session.featureId = 'trash'
+    })
+    if (next.sessions.some((session: ChatSession) => session.id === next.activeSessionId && session.featureId === 'trash')) {
+      next.activeSessionId = next.sessions.filter((session: ChatSession) => session.featureId !== 'trash')
+        .sort((a: ChatSession, b: ChatSession) => b.updatedAt - a.updatedAt)[0]?.id || ''
+    }
+    return SessionService.commitArchive(next, true)
+  }
+
+  static trash(id: string): boolean {
+    const next = SessionService.copyArchive()
+    const session = next.sessions.find((item: ChatSession) => item.id === id)
+    if (session === undefined || session.featureId === 'trash') return false
+    session.originFeatureId = session.featureId
+    session.originFeatureName = SessionService.workspaces().find((item: FeatureDefinition) => item.id === session.featureId)?.name || '智能助理'
+    session.deletedAt = Date.now()
+    session.featureId = 'trash'
+    if (next.activeSessionId === id) next.activeSessionId = next.sessions.filter((item: ChatSession) => item.featureId !== 'trash')
+      .sort((a: ChatSession, b: ChatSession) => b.updatedAt - a.updatedAt)[0]?.id || ''
+    return SessionService.commitArchive(next, true)
+  }
+
+  static restore(id: string): boolean {
+    const next = SessionService.copyArchive()
+    const session = next.sessions.find((item: ChatSession) => item.id === id)
+    if (session === undefined || session.featureId !== 'trash') return false
+    session.featureId = SessionService.workspaces().some((feature: FeatureDefinition) => feature.id === session.originFeatureId && feature.id !== 'trash')
+      ? session.originFeatureId as string : 'home'
+    session.originFeatureId = undefined
+    session.originFeatureName = undefined
+    session.deletedAt = undefined
+    next.activeSessionId = id
+    return SessionService.commitArchive(next, true)
+  }
+
+  private static copyArchive(): SessionArchive { return JSON.parse(JSON.stringify(SessionService.archive)) as SessionArchive }
+
+  private static commitArchive(next: SessionArchive, purge: boolean): boolean {
+    const previous = SessionService.archive
+    SessionService.archive = next
+    SessionService.dirty = true
+    SessionService.purgeBackup = purge
+    if (SessionService.flush()) return true
+    SessionService.archive = previous
+    SessionService.purgeBackup = false
+    SessionService.dirty = true
+    return false
   }
 
   static current(): ChatSession | undefined { return SessionService.get(SessionService.archive.activeSessionId) }
+
+  static sidebar(): SidebarPreferences | undefined {
+    return SessionService.archive.sidebar === undefined ? undefined
+      : JSON.parse(JSON.stringify(SessionService.archive.sidebar)) as SidebarPreferences
+  }
+
+  static saveSidebar(preferences: SidebarPreferences): void {
+    if (JSON.stringify(SessionService.archive.sidebar) === JSON.stringify(preferences)) return
+    SessionService.archive.sidebar = JSON.parse(JSON.stringify(preferences)) as SidebarPreferences
+    SessionService.schedule(true)
+  }
 
   static get(id: string): ChatSession | undefined {
     const session = SessionService.archive.sessions.find((item: ChatSession) => item.id === id)
@@ -107,6 +218,8 @@ export class SessionService {
   }
 
   static create(featureId: string, title: string, messages: AgentMessage[]): ChatSession {
+    if (featureId === 'trash') throw new Error('回收站不能新建对话。')
+    if (!SessionService.workspaces().some((feature: FeatureDefinition) => feature.id === featureId)) featureId = 'home'
     const now = Date.now()
     const session: ChatSession = { id: util.generateRandomUUID(), title: title, featureId: featureId,
       createdAt: now, updatedAt: now, messages: SessionService.copy(messages), context: [], progress: 1 }
@@ -123,7 +236,7 @@ export class SessionService {
 
   static saveMessages(id: string, messages: AgentMessage[], immediate: boolean = true): void {
     const session = SessionService.archive.sessions.find((item: ChatSession) => item.id === id)
-    if (session === undefined) return
+    if (session === undefined || session.featureId === 'trash') return
     // Saving a viewed conversation is not a new message and must not reorder history.
     if (JSON.stringify(session.messages) === JSON.stringify(messages)) {
       if (immediate) SessionService.flush()
@@ -140,18 +253,28 @@ export class SessionService {
 
   static saveDetails(id: string, context: SourceCitation[], progress: number): void {
     const session = SessionService.archive.sessions.find((item: ChatSession) => item.id === id)
-    if (session === undefined) return
+    if (session === undefined || session.featureId === 'trash') return
     if (session.progress === progress && JSON.stringify(session.context) === JSON.stringify(context)) return
     session.context = JSON.parse(JSON.stringify(context)) as SourceCitation[]
     session.progress = progress
     SessionService.schedule(false)
   }
 
+  static saveWorkspace(id: string, featureId: string, workspace: WorkspaceState): void {
+    const session = SessionService.archive.sessions.find((item: ChatSession) => item.id === id)
+    if (session === undefined || session.featureId === 'trash' || featureId === 'trash') return
+    if (!SessionService.workspaces().some((feature: FeatureDefinition) => feature.id === featureId)) featureId = 'home'
+    if (session.featureId === featureId && JSON.stringify(session.workspace) === JSON.stringify(workspace)) return
+    session.featureId = featureId
+    session.workspace = JSON.parse(JSON.stringify(workspace)) as WorkspaceState
+    SessionService.schedule(true)
+  }
+
   static remove(id: string): boolean {
     const removed = SessionService.archive.sessions.find((session: ChatSession) => session.id === id)
     if (removed === undefined) return false
     const previous = SessionService.archive
-    SessionService.archive = { version: 1, activeSessionId: previous.activeSessionId,
+    SessionService.archive = { version: 1, activeSessionId: previous.activeSessionId, sidebar: previous.sidebar, workspaces: previous.workspaces,
       sessions: previous.sessions.filter((session: ChatSession) => session.id !== id) }
     if (previous.activeSessionId === id) SessionService.archive.activeSessionId = SessionService.list()[0]?.id || ''
     SessionService.dirty = true
@@ -190,9 +313,9 @@ export class SessionService {
     if (!SessionService.dirty) return true
     try {
       // Keep the last valid snapshot and replace the main file atomically.
-      if (SessionService.purgeBackup) {
-        if (fs.accessSync(`${SessionService.path}.bak`)) fs.unlinkSync(`${SessionService.path}.bak`)
-      } else if (SessionService.readArchive(SessionService.path) !== undefined) {
+      // Keep the recovery copy until the replacement primary is durable. A failed
+      // delete write must not destroy the only valid copy after backup recovery.
+      if (!SessionService.purgeBackup && SessionService.readArchive(SessionService.path) !== undefined) {
         fs.copyFileSync(SessionService.path, `${SessionService.path}.bak`)
       }
       const file = fs.openSync(`${SessionService.path}.tmp`, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC)
@@ -205,8 +328,10 @@ export class SessionService {
       SessionService.storageNotice = ''
       if (SessionService.purgeBackup) {
         SessionService.purgeBackup = false
-        try { fs.copyFileSync(SessionService.path, `${SessionService.path}.bak`) }
-        catch (_error) { SessionService.storageNotice = '会话已删除，本地备份暂不可用。' }
+        try {
+          if (fs.accessSync(`${SessionService.path}.bak`)) fs.unlinkSync(`${SessionService.path}.bak`)
+          fs.copyFileSync(SessionService.path, `${SessionService.path}.bak`)
+        } catch (_error) { SessionService.storageNotice = '修改已保存，本地备份暂不可用。' }
       }
       return true
     } catch (_error) {

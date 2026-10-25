@@ -2,6 +2,7 @@ import { AgentMessage } from './AppModels'
 import { RetrievalResult } from './RagModels'
 import { SourceCitation } from './RagModels'
 import { ChatAttachment } from './AttachmentModels'
+import { AgentToolCall, AgentToolDefinition } from './WorkspaceModels'
 
 export interface AgentRequest {
   prompt: string
@@ -10,6 +11,8 @@ export interface AgentRequest {
   retrieval: RetrievalResult
   systemInstruction: string
   attachments?: ChatAttachment[]
+  tools?: AgentToolDefinition[]
+  executeTool?: (call: AgentToolCall) => Promise<string>
 }
 
 export interface StreamSink {

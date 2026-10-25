@@ -5,16 +5,44 @@ import { ApiConfig, AgentApiSettings } from '../config/ApiConfig'
 import { AgentGateway, AgentRequest, StreamSink } from '../models/IntegrationModels'
 import { AttachmentService } from './AttachmentService'
 import { ChatAttachment, ModelContentPart } from '../models/AttachmentModels'
+import { AgentToolDefinition } from '../models/WorkspaceModels'
 
 interface OutgoingMessage {
   role: string
   content: string | ModelContentPart[]
+  tool_calls?: WireToolCall[]
+  tool_call_id?: string
+}
+
+interface WireToolFunction {
+  name?: string
+  arguments?: string
+}
+
+interface WireToolCall {
+  index?: number
+  id?: string
+  type?: string
+  function?: WireToolFunction
+}
+
+interface CompletionResult {
+  content: string
+  calls: WireToolCall[]
+}
+
+interface CompletionBody {
+  model: string
+  messages: OutgoingMessage[]
+  stream: boolean
+  tools?: AgentToolDefinition[]
 }
 
 interface ChatMessagePayload {
   role: string
   content: string
   reasoning_content?: string
+  tool_calls?: WireToolCall[]
 }
 
 interface ChatCompletionChoice {
@@ -94,6 +122,49 @@ export class OpenAiCompatibleGateway implements AgentGateway {
     })
     messages.push({ role: 'user', content: AttachmentService.content(request.prompt.slice(0, ApiConfig.maxMessageChars), currentAttachments) })
 
+    let executed = 0
+    for (let round = 0; round < 5; round++) {
+      if (sink.isCancelled()) return
+      const result = await this.completion(messages, request, sink, round < 4)
+      if (sink.isCancelled() || result.calls.length === 0) return
+      if (request.executeTool === undefined || round === 4) throw new Error('模型请求了不可用的工具，请重试。')
+      messages.push({ role: 'assistant', content: result.content, tool_calls: result.calls })
+      for (const call of result.calls) {
+        if (sink.isCancelled()) return
+        if (++executed > 12) throw new Error('本轮工具操作次数已达上限，请继续发送下一步要求。')
+        sink.onProgress?.('updating')
+        const output = await request.executeTool({ id: call.id as string, name: call.function?.name || '',
+          arguments: call.function?.arguments || '{}' })
+        if (sink.isCancelled()) return
+        messages.push({ role: 'tool', tool_call_id: call.id, content: output })
+      }
+      sink.onDelta('\n\n')
+    }
+  }
+
+  private async completion(messages: OutgoingMessage[], request: AgentRequest, sink: StreamSink,
+    allowTools: boolean): Promise<CompletionResult> {
+    let assistantText = ''
+    let streamError = ''
+    const calls = new Map<number, WireToolCall>()
+    const collectCalls = (deltas: WireToolCall[]): void => {
+      if (streamError.length > 0) return
+      deltas.forEach((delta: WireToolCall, position: number) => {
+        const index = delta.index === undefined ? position : delta.index
+        if (!Number.isInteger(index) || index < 0 || index >= 8) { streamError = '模型工具调用数量或索引不正确。'; return }
+        const call: WireToolCall = calls.get(index) || { id: '', type: 'function', function: { name: '', arguments: '' } }
+        call.id = `${call.id || ''}${delta.id || ''}`
+        const fn = call.function as WireToolFunction
+        fn.name = `${fn.name || ''}${delta.function?.name || ''}`
+        fn.arguments = `${fn.arguments || ''}${delta.function?.arguments || ''}`
+        if (fn.arguments.length > 40000 || fn.name.length > 100 || (call.id || '').length > 160) {
+          streamError = '模型工具参数过长。'
+          return
+        }
+        calls.set(index, call)
+      })
+    }
+
     const headers: Record<string, string> = {
       'content-type': 'application/json',
       'accept': 'text/event-stream, application/json'
@@ -105,7 +176,6 @@ export class OpenAiCompatibleGateway implements AgentGateway {
     let pendingLine = ''
     let responseText = ''
     let streamedContent = false
-    let streamError = ''
     let analysisAnnounced = false
     const decoder = util.TextDecoder.create('utf-8')
     hilog.info(OpenAiCompatibleGateway.LOG_DOMAIN, OpenAiCompatibleGateway.LOG_TAG, 'SSE request started')
@@ -121,6 +191,7 @@ export class OpenAiCompatibleGateway implements AgentGateway {
           return
         }
         const payload = parsed.choices?.[0]?.delta
+        if (payload?.tool_calls) collectCalls(payload.tool_calls)
         if (payload?.reasoning_content && !analysisAnnounced && !streamedContent && !sink.isCancelled()) {
           analysisAnnounced = true
           // Only report that inference is in progress; do not expose or retain private reasoning.
@@ -129,6 +200,7 @@ export class OpenAiCompatibleGateway implements AgentGateway {
         const delta = payload?.content
         if (delta && delta.length > 0 && !sink.isCancelled()) {
           streamedContent = true
+          assistantText = (assistantText + delta).slice(0, 32000)
           sink.onDelta(delta)
         }
       } catch (_error) {
@@ -138,7 +210,8 @@ export class OpenAiCompatibleGateway implements AgentGateway {
     try {
       const options: http.HttpRequestOptions = {
         method: http.RequestMethod.POST,
-        extraData: JSON.stringify({ model: this.settings.model, messages: messages, stream: true }),
+        extraData: JSON.stringify({ model: this.settings.model, messages: messages, stream: true,
+          tools: allowTools && request.executeTool !== undefined ? request.tools : undefined } as CompletionBody),
         expectDataType: http.HttpDataType.STRING,
         connectTimeout: ApiConfig.requestTimeoutMs,
         readTimeout: ApiConfig.requestTimeoutMs,
@@ -149,6 +222,7 @@ export class OpenAiCompatibleGateway implements AgentGateway {
         const chunk = decoder.decodeToString(new Uint8Array(data), { stream: true })
         responseText = (responseText + chunk).slice(-200000)
         pendingLine += chunk
+        if (pendingLine.length > 400000) { streamError = '模型返回的单个数据片段过大。'; pendingLine = ''; return }
         let newline = pendingLine.indexOf('\n')
         while (newline >= 0) {
           consumeLine(pendingLine.slice(0, newline))
@@ -159,7 +233,7 @@ export class OpenAiCompatibleGateway implements AgentGateway {
       const responseCode = await client.requestInStream(this.completionsUrl(), options)
       hilog.info(OpenAiCompatibleGateway.LOG_DOMAIN, OpenAiCompatibleGateway.LOG_TAG,
         'SSE request completed with HTTP %{public}d', responseCode)
-      if (sink.isCancelled()) return
+      if (sink.isCancelled()) return { content: '', calls: [] }
       const trailingText = decoder.decodeToString(new Uint8Array(0), { stream: false })
       pendingLine += trailingText
       if (pendingLine.trim().length > 0) consumeLine(pendingLine)
@@ -174,17 +248,27 @@ export class OpenAiCompatibleGateway implements AgentGateway {
         try {
           const parsed = JSON.parse(responseText) as ChatCompletionResponse
           const content = parsed.choices?.[0]?.message?.content
+          const toolCalls = parsed.choices?.[0]?.message?.tool_calls
+          if (toolCalls) collectCalls(toolCalls)
           if (content && content.trim().length > 0 && !sink.isCancelled()) {
             streamedContent = true
+            assistantText = content
             sink.onDelta(content)
           }
         } catch (_error) {
           throw new Error('模型服务返回格式无法识别，请确认接口支持 OpenAI Chat Completions。')
         }
       }
-      if (!streamedContent) throw new Error('模型服务已响应，但没有返回回答内容。')
+      if (streamError.length > 0) throw new Error(streamError)
+      if (!streamedContent && calls.size === 0) throw new Error('模型服务已响应，但没有返回回答内容。')
+      const completed = Array.from(calls.keys()).sort((a: number, b: number) => a - b)
+        .map((index: number): WireToolCall => calls.get(index) as WireToolCall)
+      completed.forEach((call: WireToolCall, index: number) => {
+        if (!call.id) call.id = `workspace-call-${index}`
+      })
+      return { content: assistantText, calls: completed }
     } catch (error) {
-      if (sink.isCancelled()) return
+      if (sink.isCancelled()) return { content: '', calls: [] }
       hilog.error(OpenAiCompatibleGateway.LOG_DOMAIN, OpenAiCompatibleGateway.LOG_TAG, 'SSE request failed')
       const message = (error as Error).message
       if (message && message.length > 0) throw new Error(message)

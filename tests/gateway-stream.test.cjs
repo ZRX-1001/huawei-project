@@ -10,6 +10,8 @@ let wire = '';
 let status = 200;
 let destroyed = 0;
 let sentOptions;
+let responses = [];
+const sentBodies = [];
 const http = {
   RequestMethod: { POST: 'POST' }, HttpDataType: { STRING: 'string' },
   createHttp: () => {
@@ -20,7 +22,8 @@ const http = {
       requestInStream: async (url, options) => {
         assert.equal(url, 'https://example.invalid/v1/chat/completions');
         sentOptions = options;
-        const bytes = Buffer.from(wire);
+        sentBodies.push(JSON.parse(options.extraData));
+        const bytes = Buffer.from(responses.length ? responses.shift() : wire);
         // Force UTF-8 and SSE frames to cross arbitrary byte boundaries.
         for (let i = 0; i < bytes.length; i += 7) {
           const part = bytes.subarray(i, i + 7);
@@ -74,5 +77,47 @@ const event = delta => `data: ${JSON.stringify({ choices: [{ delta }] })}\r\n\r\
   let cancelledContent = '';
   await gateway.generate(request, { isCancelled: () => true, onDelta: value => { cancelledContent += value; } });
   assert.equal(cancelledContent, '');
-  console.log('PASS: UTF-8 split SSE, analysis status, private reasoning isolation, JSON fallback, errors, cancellation.');
+  const calls = [];
+  const toolRequest = { ...request, tools: [{ type: 'function', function: { name: 'update_task_panel',
+    description: 'test', parameters: { type: 'object', properties: {} } } }], executeTool: async call => {
+      calls.push(JSON.parse(JSON.stringify(call)));
+      return JSON.stringify({ ok: true, message: '已保存' });
+    } };
+  responses = [event({ tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: {
+    name: 'update_task_panel', arguments: '{"goal":"学习' } }] }) + event({ tool_calls: [{ index: 0,
+      function: { arguments: '目标"}' } }] }) + 'data: [DONE]\n', event({ content: '面板已更新。' }) + 'data: [DONE]\n'];
+  content = '';
+  await gateway.generate(toolRequest, { isCancelled: () => false, onDelta: v => { content += v; } });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].arguments, '{"goal":"学习目标"}');
+  assert.equal(calls[0].name, 'update_task_panel');
+  assert.match(content, /面板已更新/);
+  const followup = sentBodies.at(-1);
+  assert.equal(followup.messages.at(-1).role, 'tool');
+  assert.equal(followup.messages.at(-1).tool_call_id, 'call_1');
+  assert.equal(followup.messages.at(-2).tool_calls[0].function.arguments, calls[0].arguments);
+  assert.equal(followup.tools[0].function.name, 'update_task_panel');
+  responses = [JSON.stringify({ choices: [{ message: { content: null, tool_calls: [{ id: 'json_call', type: 'function',
+    function: { name: 'update_task_panel', arguments: '{}' } }] } }] }), event({ content: 'JSON工具成功' })];
+  await gateway.generate(toolRequest, { isCancelled: () => false, onDelta: () => {} });
+  assert.equal(calls.at(-1).id, 'json_call');
+  const callOrder = [];
+  responses = [event({ tool_calls: [
+    { index: 1, id: 'second', function: { name: 'read_workspace', arguments: '{}' } },
+    { index: 0, id: 'first', function: { name: 'read_workspace', arguments: '{}' } }
+  ] }), event({ content: '多工具完成' })];
+  await gateway.generate({ ...toolRequest, executeTool: async call => { callOrder.push(call.id); return '{}'; } },
+    { isCancelled: () => false, onDelta: () => {} });
+  assert.deepEqual(callOrder, ['first', 'second'], 'tool indices must determine execution order');
+  let stopped = false;
+  const beforeRequests = sentBodies.length;
+  responses = [event({ tool_calls: [{ index: 0, id: 'cancel_call', function: { name: 'read_workspace', arguments: '{}' } }] })];
+  await gateway.generate({ ...toolRequest, executeTool: async () => { stopped = true; return '{}'; } },
+    { isCancelled: () => stopped, onDelta: () => {} });
+  assert.equal(sentBodies.length, beforeRequests + 1, 'cancel after a tool must prevent another request');
+  responses = Array.from({ length: 5 }, () => event({ tool_calls: [{ index: 0, id: 'loop_call', function: { name: 'read_workspace', arguments: '{}' } }] }));
+  await assert.rejects(gateway.generate(toolRequest, { isCancelled: () => false, onDelta: () => {} }), /不可用的工具/);
+  assert.equal(sentBodies.at(-1).tools, undefined, 'last round must request a final answer without tools');
+  responses = [];
+  console.log('PASS: split UTF-8/SSE, reasoning isolation, JSON fallback, errors, streamed tools, tool results, cancellation and bounded rounds.');
 })().catch(error => { console.error(error); process.exitCode = 1; });
