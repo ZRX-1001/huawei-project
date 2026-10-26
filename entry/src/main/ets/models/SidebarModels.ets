@@ -8,8 +8,15 @@ export interface SidebarPreferences {
   expandedHistoryIds: string[]
   showAllRecent: boolean
   panelVisible: boolean
+  taskPanelVisible?: boolean
   leftWidth?: number
+  fontScale?: number
   rightWidth?: number
+}
+
+export interface PanelResizeResult {
+  width: number
+  collapsed: boolean
 }
 
 export interface SidebarWorkspaceGroup {

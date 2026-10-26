@@ -59,6 +59,8 @@ try {
   const panel = { goal: '复习计划', summary: '用户确认目标', tasks: [{ id: 'study', title: '复习图算法', detail: '周三', status: 'pending' }],
     artifacts: [{ id: 'notes', title: '学习笔记', content: '## 图遍历' }], updatedAt: now };
   const panelTime = service.get(first.id).updatedAt;
+  panel.interactions = [{ id: 'message-0', source: 'message', title: '复习回执', updatedAt: now,
+    values: [{ id: 'notes', label: '实际时间', kind: 'text', value: '周三17:30' }] }];
   service.saveWorkspace(first.id, 'home', panel);
   const sidebar = { workspaceSectionExpanded: true, recentSectionExpanded: false, expandedWorkspaceIds: ['home'],
     expandedHistoryIds: ['home'], showAllRecent: true, panelVisible: false };
@@ -87,6 +89,7 @@ try {
   assert.equal(service.sidebar().recentSectionExpanded, false);
   assert.equal(service.sidebar().panelVisible, false, 'sidebar visibility must survive restart');
   assert.equal(service.get(first.id).workspace.artifacts[0].content, '## 图遍历');
+  assert.equal(service.get(first.id).workspace.interactions[0].values[0].value, '周三17:30', 'manual interaction state must survive process restart');
   assert.equal(service.get(second.id).workspace, undefined, 'panel must stay isolated per conversation');
   assert.equal(service.get(first.id).context[0].excerpt, '引用正文');
   assert.equal(service.get(first.id).messages[125].status, 'stopped', 'interrupted streams must settle');
@@ -171,6 +174,7 @@ try {
   }
   assert.equal(service.get(a.id).updatedAt, beforeTrash.updatedAt, 'deletion time must not overwrite conversation time');
   assert.equal(service.get(a.id).workspace.goal, '论文计划');
+  assert.equal(service.get(a.id).workspace.interactions[0].values[0].value, '周三17:30', 'trash must preserve interactive responses');
   assert.equal(service.get(a.id).context.length, 1);
   assert.ok(fs.existsSync(keptAttachment), 'workspace deletion must keep attachment files');
   service.saveMessages(a.id, [message('user', 'stale callback')]);
@@ -187,6 +191,7 @@ try {
   assert.equal(service.get(a.id).featureId, 'home', 'deleted original workspace restores to assistant');
   assert.equal(service.get(a.id).deletedAt, undefined);
   assert.equal(service.get(a.id).updatedAt, beforeTrash.updatedAt);
+  assert.equal(service.get(a.id).workspace.interactions[0].values[0].value, '周三17:30', 'restore to assistant must preserve interactive responses');
   assert.ok(fs.existsSync(keptAttachment));
   assert.equal(service.trash(a.id), true);
   assert.equal(service.restore(a.id), true);
@@ -200,10 +205,12 @@ try {
   assert.equal(service.workspaces().length, failedCount);
   failRename = false;
   service.flush();
-  service.saveSidebar({ ...sidebar, leftWidth: 320, rightWidth: 350 });
+  service.saveSidebar({ ...sidebar, leftWidth: 320, rightWidth: 350, fontScale: 1.1, taskPanelVisible: false });
   service = boot();
   assert.equal(service.sidebar().leftWidth, 320);
   assert.equal(service.sidebar().rightWidth, 350);
+  assert.equal(service.sidebar().fontScale, 1.1);
+  assert.equal(service.sidebar().taskPanelVisible, false);
   fs.writeFileSync(archivePath, '{broken');
   fs.writeFileSync(`${archivePath}.bak`, '{also broken');
   service = boot();

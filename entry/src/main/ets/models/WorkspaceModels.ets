@@ -1,3 +1,5 @@
+import { InteractionRecord } from './InteractionModels'
+
 export interface WorkspaceTask {
   id: string
   title: string
@@ -17,6 +19,7 @@ export interface WorkspaceState {
   tasks: WorkspaceTask[]
   artifacts: WorkspaceArtifact[]
   updatedAt: number
+  interactions?: InteractionRecord[]
 }
 
 export interface WorkspaceProfile {

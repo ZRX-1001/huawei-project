@@ -49,7 +49,7 @@ assert.equal(sidebar.normalize(undefined).panelVisible, true);
 assert.equal(sidebar.normalize({ panelVisible: false, expandedWorkspaceIds: [123, 'study'] }).panelVisible, false);
 assert.deepEqual(Array.from(sidebar.normalize({ expandedWorkspaceIds: [123, 'study'] }).expandedWorkspaceIds), ['study']);
 assert.equal(sidebar.normalize({ leftWidth: 999, rightWidth: 1 }).leftWidth, 400);
-assert.equal(sidebar.normalize({ leftWidth: 999, rightWidth: 1 }).rightWidth, 240);
+assert.equal(sidebar.normalize({ leftWidth: 999, rightWidth: 1 }).rightWidth, 244);
 assert.equal(sidebar.normalize({ leftWidth: NaN, rightWidth: Infinity }).leftWidth, 256);
 assert.equal(sidebar.normalize({ leftWidth: NaN, rightWidth: Infinity }).rightWidth, 274);
 const recycled = [{ ...sessions[0], featureId: 'trash', deletedAt: 100 }, { ...sessions[1], featureId: 'trash', deletedAt: 200 }, ...sessions.slice(2)];
@@ -61,3 +61,33 @@ view = sidebar.view(recycled, [...features, { id: 'trash', name: '回收站' }],
 assert.equal(view.recentCount, 0);
 assert.equal(view.workspaces.find(g => g.feature.id === 'trash').sessions[0].id, 'chat-1');
 console.log('PASS: shared workspace/recent identities, stable dates, independent folders, previews, search, workspace moves and synchronized deletion.');
+
+assert.equal(sidebar.defaults().fontScale, 0.9);
+assert.equal(sidebar.normalize({ fontScale: 5 }).fontScale, 1.3);
+assert.equal(sidebar.normalize({ fontScale: 0.1 }).fontScale, 0.8);
+assert.equal(sidebar.normalize({ fontScale: NaN }).fontScale, 0.9);
+assert.equal(sidebar.normalize({ fontScale: 1.1 }).fontScale, 1.1);
+
+for (const side of ['left', 'right']) {
+  const minimum = sidebar.panelMinimum(side, 0.9);
+  const direction = side === 'left' ? 1 : -1;
+  assert.equal(sidebar.resize(side, minimum + 40, -40 * direction, 400, 0.9).width, minimum);
+  assert.equal(sidebar.resize(side, minimum + 40, -40 * direction, 400, 0.9).collapsed, false, 'reaching minimum should preserve expanded layout');
+  assert.equal(sidebar.resize(side, minimum + 40, -52 * direction, 400, 0.9).collapsed, false, 'small drag jitter at the minimum must not collapse');
+  assert.equal(sidebar.resize(side, minimum + 40, -53 * direction, 400, 0.9).collapsed, false, 'minimum readable width is not the collapse threshold');
+  assert.equal(sidebar.resize(side, 300, -199 * direction, 420, 0.9).collapsed, false, 'above one third stays expanded');
+  assert.equal(sidebar.resize(side, 300, -200 * direction, 420, 0.9).collapsed, true, 'one third of drag-start width collapses');
+  assert.equal(sidebar.resize(side, 300, -210 * direction, 420, 0.9).collapsed, true, 'below one third collapses without reaching the screen edge');
+  assert.equal(sidebar.resize(side, 300, -199 * direction, 420, 0.9).collapsed, false, 'dragging back above one third cancels pending collapse');
+  assert.equal(sidebar.resize(side, 360, -239 * direction, 420, 1.3).collapsed, false, 'large fonts retain the proportional threshold');
+  assert.equal(sidebar.resize(side, 360, -240 * direction, 420, 1.3).collapsed, true);
+  assert.equal(sidebar.resize(side, minimum + 40, 1000 * direction, 400, 0.9).width, 400);
+  assert.equal(sidebar.resize(side, minimum, 0, minimum - 40, 0.9).width, minimum, 'space constraints cannot produce an unreadable expanded panel');
+  assert.ok(sidebar.panelMinimum(side, 1.3) > minimum, 'large fonts require a wider readable panel');
+  assert.equal(sidebar.resize(side, 300, NaN, 400, 0.9).collapsed, false);
+}
+assert.equal(sidebar.normalize({taskPanelVisible: false}).taskPanelVisible, false);
+assert.equal(sidebar.normalize({}).taskPanelVisible, true);
+assert.ok(sidebar.normalize({fontScale: 1.3, leftWidth: 1, rightWidth: 1}).leftWidth >= sidebar.panelMinimum('left', 1.3));
+assert.ok(sidebar.normalize({fontScale: 1.3, leftWidth: 1, rightWidth: 1}).rightWidth >= sidebar.panelMinimum('right', 1.3));
+console.log('PASS: responsive panel minima, symmetric one-third collapse, threshold reversal, width limits and right-panel preference.');

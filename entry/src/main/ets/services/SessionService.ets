@@ -260,14 +260,14 @@ export class SessionService {
     SessionService.schedule(false)
   }
 
-  static saveWorkspace(id: string, featureId: string, workspace: WorkspaceState): void {
+  static saveWorkspace(id: string, featureId: string, workspace: WorkspaceState, immediate: boolean = true): void {
     const session = SessionService.archive.sessions.find((item: ChatSession) => item.id === id)
     if (session === undefined || session.featureId === 'trash' || featureId === 'trash') return
     if (!SessionService.workspaces().some((feature: FeatureDefinition) => feature.id === featureId)) featureId = 'home'
     if (session.featureId === featureId && JSON.stringify(session.workspace) === JSON.stringify(workspace)) return
     session.featureId = featureId
     session.workspace = JSON.parse(JSON.stringify(workspace)) as WorkspaceState
-    SessionService.schedule(true)
+    SessionService.schedule(immediate)
   }
 
   static remove(id: string): boolean {

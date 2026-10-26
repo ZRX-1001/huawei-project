@@ -1,6 +1,7 @@
 import { WorkspaceConfig } from '../config/WorkspaceConfig'
 import { FEATURE_CATALOG } from '../config/FeatureCatalog'
 import { FeatureDefinition } from '../models/AppModels'
+import { InteractionService } from './InteractionService'
 import { AgentToolDefinition, WorkspaceArtifact, WorkspaceOption, WorkspaceSnapshot, WorkspaceState, WorkspaceTask, WorkspaceToolResult, WorkspaceUpdate } from '../models/WorkspaceModels'
 
 export class WorkspaceService {
@@ -17,15 +18,26 @@ export class WorkspaceService {
       const restored = WorkspaceService.update(WorkspaceService.create(featureId, features), {
         goal: state.goal, summary: state.summary, tasks: state.tasks, artifacts: state.artifacts })
       restored.updatedAt = Number.isFinite(state.updatedAt) ? state.updatedAt : 0
+      restored.interactions = InteractionService.restore(state.interactions)
       return restored
-    } catch (_error) { return WorkspaceService.create(featureId, features) }
+    } catch (_error) {
+      const fallback = WorkspaceService.create(featureId, features)
+      fallback.interactions = InteractionService.restore(state.interactions)
+      return fallback
+    }
   }
 
-  static snapshot(featureId: string, state: WorkspaceState, features: FeatureDefinition[] = FEATURE_CATALOG): string {
+  static snapshot(featureId: string, state: WorkspaceState, features: FeatureDefinition[] = FEATURE_CATALOG, includeInteractions: boolean = true): string {
     const profile = WorkspaceConfig.profile(featureId, features)
     const snapshot: WorkspaceSnapshot = { featureId: featureId, name: profile.name, role: profile.role, instruction: profile.instruction,
-      state: state, workspaces: features.filter((item: FeatureDefinition) => item.id !== 'trash')
+      state: WorkspaceService.copy(state), workspaces: features.filter((item: FeatureDefinition) => item.id !== 'trash')
         .map((item): WorkspaceOption => ({ id: item.id, name: item.name, description: item.description })) }
+    if (!includeInteractions) snapshot.state.interactions = undefined
+    else {
+      const sources: Record<string, string> = { 'memory-summary': state.summary }
+      state.artifacts.forEach((artifact: WorkspaceArtifact) => { sources[`artifact-${artifact.id}`] = artifact.content })
+      snapshot.state.interactions = InteractionService.snapshotRecords(state.interactions, sources)
+    }
     return JSON.stringify(snapshot)
   }
 
@@ -102,6 +114,7 @@ export class WorkspaceService {
       next.goal = state.goal
       next.summary = state.summary
       next.artifacts = WorkspaceService.copy(state).artifacts
+      next.interactions = InteractionService.restore(state.interactions)
       next.updatedAt = Date.now()
       return { featureId: target, state: next, message: `已归入${WorkspaceConfig.profile(target, features).name}，保留对话和产物。` }
     }
