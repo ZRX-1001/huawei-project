@@ -24,6 +24,10 @@ import { SidebarService } from '../services/SidebarService'
 import { InteractiveContent } from '../components/InteractiveContent'
 import { InteractionChange, InteractionRecord } from '../models/InteractionModels'
 import { InteractionService } from '../services/InteractionService'
+import { ScheduleService } from '../services/ScheduleService'
+import { TaskCenterPage } from '../components/TaskCenterPage'
+import { LibraryPage } from '../components/LibraryPage'
+import { AgentTaskManager } from '../services/AgentTaskManager'
 
 class ChatStreamSink implements StreamSink {
   private cancelled: () => boolean
@@ -58,6 +62,8 @@ class ChatVoiceObserver implements VoiceObserver {
 struct Index {
   @StorageLink('campusFontScale') fontScale: number = 0.9
   @State appearanceSettingsVisible: boolean = false
+  @State appSection: string = 'chat'
+  @State taskCenterTab: string = 'agent'
   @State features: FeatureDefinition[] = []
   @State workspaceEditorVisible: boolean = false
   @State workspaceName: string = ''
@@ -145,7 +151,18 @@ struct Index {
 
   aboutToAppear(): void {
     this.features = SessionService.workspaces()
+    const host = this.getUIContext().getHostContext() as common.UIAbilityContext
+    IntegrationService.initializeLibrary(host)
+    try {
+      SessionService.list().forEach((summary: SessionSummary) => {
+        const session = SessionService.get(summary.id)
+        if (session === undefined) return
+        session.messages.forEach((message: AgentMessage) => IntegrationService.library?.register(message.attachments || [], '对话附件'))
+        session.context.forEach((source: SourceCitation) => IntegrationService.library?.registerContext(source))
+      })
+    } catch (_error) { this.storageNotice = '部分旧附件未迁入资料库，原对话文件仍保留。' }
     IntegrationService.initializeVoice(this.getUIContext().getHostContext() as common.UIAbilityContext)
+    IntegrationService.initializeSchedule(this.getUIContext().getHostContext() as common.UIAbilityContext)
     this.refreshKnowledge()
     const savedSidebar = SessionService.sidebar()
     const sidebar = SidebarService.normalize(savedSidebar)
@@ -170,7 +187,7 @@ struct Index {
   private async loadLocalAgentConfig(): Promise<void> {
     if (IntegrationService.agentSettings.baseUrl.length > 0) return
     const settings = await LocalAgentConfigService.load(this.getUIContext().getHostContext() as common.UIAbilityContext)
-    if (settings === undefined || IntegrationService.agentSettings.baseUrl.length > 0) return
+    if (settings === undefined || !settings.baseUrl || !settings.model || IntegrationService.agentSettings.baseUrl.length > 0) return
     IntegrationService.configureAgent(settings)
     this.apiBaseUrl = settings.baseUrl
     this.apiModel = settings.model
@@ -205,7 +222,8 @@ struct Index {
     if (this.knowledgeCount > 0) return
     const repository = new MemoryKnowledgeRepository()
     repository.replace(demoKnowledgeIndex())
-    IntegrationService.knowledge = repository
+    if (IntegrationService.library !== undefined) IntegrationService.library.setBase(repository)
+    else IntegrationService.knowledge = repository
     this.refreshKnowledge()
     this.notice = '已载入 5 段离线演示资料，非学校官方资料。'
   }
@@ -229,6 +247,8 @@ struct Index {
       this.apiNotice = '请填写模型名称，例如 qwen-plus 或 gpt-4o-mini。'
       return
     }
+    try { LocalAgentConfigService.saveRuntime(this.getUIContext().getHostContext() as common.UIAbilityContext, { baseUrl: baseUrl, model: model, apiKey: this.apiKey }) }
+    catch (_error) { this.apiNotice = '配置保存失败，请检查本机存储后重试。'; return }
     IntegrationService.configureAgent({ baseUrl: baseUrl, model: model, apiKey: this.apiKey })
     this.apiConfigured = true
     this.apiNotice = '已保存配置。新发送的消息将由该模型生成。'
@@ -261,6 +281,7 @@ struct Index {
   }
 
   private toggleContextSource(source: SourceCitation): void {
+    try { IntegrationService.library?.registerContext(source) } catch (_error) {}
     const exists = this.selectedContext.some((item: SourceCitation) => item.chunkId === source.chunkId)
     this.selectedContext = exists
       ? this.selectedContext.filter((item: SourceCitation) => item.chunkId !== source.chunkId)
@@ -326,6 +347,8 @@ struct Index {
       if (files.length > 0) this.notice = files.some((item: ChatAttachment) => item.truncated)
         ? '附件已添加。较长文档将只提供前 12000 个字符给模型。'
         : files.some((item: ChatAttachment) => item.kind === 'image') ? '图片已添加，发送后由当前模型处理；图片理解需要模型支持视觉。' : '附件已添加，发送后模型可读取其文字。'
+      try { IntegrationService.library?.register(files, '对话附件'); this.refreshKnowledge() }
+      catch (_error) { this.notice += ' 资料库保存失败，可在资料库中重新导入。' }
     } catch (error) {
       if (token === this.importSerial) this.notice = (error as Error).message || '附件导入失败，请重新选择。'
     } finally { if (token === this.importSerial) this.attachmentBusy = false }
@@ -540,9 +563,12 @@ struct Index {
   private changeInteraction(id: string, source: string, title: string, content: string, change: InteractionChange): void {
     if (this.thinking || this.isWelcomePage || this.activeFeature === 'trash' || !this.activeSession ||
       change.sessionId !== this.activeSession || change.documentId !== id) return
+    if (change.submit === true && (this.recording || this.voiceBusy || this.attachmentBusy || this.actionBusy)) {
+      this.notice = '请先结束录音或等待当前操作完成，再提交检查。'; return
+    }
     try {
       const control = InteractionService.layout(content).controls.find((item) => item.id === change.controlId)
-      if (change.reset !== true && control !== undefined && !InteractionService.isPreviousVersion(this.feedbackFor(id), content) &&
+      if (change.submit !== true && change.reset !== true && control !== undefined && !InteractionService.isPreviousVersion(this.feedbackFor(id), content) &&
         InteractionService.controlValue(this.feedbackFor(id), control) === change.value) return
       const next = WorkspaceService.copy(this.workspace)
       next.interactions = InteractionService.update(next.interactions, id, source, title, content, change)
@@ -551,6 +577,11 @@ struct Index {
       SessionService.saveWorkspace(this.activeSession, this.activeFeature, this.workspace,
         change.reset === true || (change.controlId !== 'notes' && !change.controlId.includes('-cell-') && !change.controlId.includes('-blank-')))
       this.storageNotice = SessionService.storageNotice
+      if (change.submit === true && change.controlId === 'decision' && change.value === 'confirmed') {
+        const review = InteractionService.review(content, this.feedbackFor(id))
+        this.artifactVisible = false
+        this.sendMessage(`请检查我提交的「${title}」：根据当前填写和勾选情况回复，有缺失请指出，信息完整则给出结果。`, review)
+      }
     } catch (error) {
       this.notice = (error as Error).message || '交互反馈保存失败，请重试。'
       try { this.getUIContext().getPromptAction().showToast({ message: this.notice, duration: 2000 }) } catch (_error) {}
@@ -568,6 +599,34 @@ struct Index {
     if (token !== this.requestSerial || sessionId !== this.activeSession) return JSON.stringify({ ok: false, message: '会话已切换或生成已停止。' })
     const uiContext = this.getUIContext()
     try {
+      if (call.name === 'manage_agent_task') {
+        const active = (): boolean => token === this.requestSerial && sessionId === this.activeSession
+        return await AgentTaskManager.execute(this.getUIContext().getHostContext() as common.UIAbilityContext, call, active,
+          async (title: string, detail: string): Promise<boolean> => {
+            if (!active()) return false
+            try {
+              const choice = await uiContext.getPromptAction().showDialog({ title: title, message: detail,
+                buttons: [{ text: '取消', color: '#777777' }, { text: '确认', color: '#202020' }] })
+              return active() && choice.index === 1
+            } catch (_error) { return false }
+          })
+      }
+      if (ScheduleService.handles(call.name)) {
+        const platform = IntegrationService.schedule
+        if (platform === undefined) return JSON.stringify({ ok: false, message: '系统日程服务尚未初始化。' })
+        const active = (): boolean => token === this.requestSerial && sessionId === this.activeSession
+        const result = await ScheduleService.execute(call, platform, active, async (title: string, detail: string): Promise<boolean> => {
+          if (!active()) return false
+          try {
+            const choice = await uiContext.getPromptAction().showDialog({ title: title, message: detail,
+              buttons: [{ text: '取消', color: '#777777' }, { text: '确认', color: '#202020' }] })
+            return active() && choice.index === 1
+          } catch (_error) { return false }
+        })
+        // A completed native operation stays a real receipt even if the user changes conversation afterwards.
+        if (active()) uiContext.runScopedTask(() => { this.moduleNotice = result.message })
+        return JSON.stringify(result)
+      }
       const result = WorkspaceService.applyTool(call.name, call.arguments, this.activeFeature, this.workspace, this.features)
       if (result.action !== undefined) {
         const adapter = result.featureId === 'forms' ? IntegrationService.forms : result.featureId === 'study'
@@ -601,6 +660,7 @@ struct Index {
   }
 
   private chooseFeature(feature: FeatureDefinition): void {
+    this.appSection = 'chat'
     if (feature.id === 'trash') { this.openRecycleBin(); return }
     this.stopReply()
     this.persistSession()
@@ -646,6 +706,7 @@ struct Index {
   }
 
   private openSession(session: string): void {
+    this.appSection = 'chat'
     if (session === this.activeSession) return
     const saved = SessionService.get(session)
     if (saved === undefined) return
@@ -788,18 +849,19 @@ struct Index {
 
   private panelWidth(side: string): number {
     const minimum = SidebarService.panelMinimum(side, this.fontScale)
-    const available = Math.max(minimum, this.viewportWidth - 360 -
+    const available = Math.max(minimum, this.viewportWidth - this.globalRailWidth() - 360 -
       (side === 'left' ? (this.isTaskPanelVisible && !this.isWelcomePage && this.activeFeature !== 'trash' ? this.rightWidth + 8 : 0)
-        : (this.isLeftPanelVisible ? Math.max(this.leftWidth, SidebarService.panelMinimum('left', this.fontScale)) : this.railWidth()) + 8))
+        : (this.isLeftPanelVisible ? Math.max(this.leftWidth, SidebarService.panelMinimum('left', this.fontScale)) : 0) + 8))
     return Math.min(Math.max(side === 'left' ? this.leftWidth : this.rightWidth, minimum), available)
   }
 
   private railWidth(): number { return 52 * Math.max(1, this.fontScale) }
+  private globalRailWidth(): number { return 52 * Math.max(1, this.fontScale) }
 
   private resizePanel(side: string, offset: number): void {
-    const maximum = Math.max(SidebarService.panelMinimum(side, this.fontScale), this.viewportWidth - 360 -
+    const maximum = Math.max(SidebarService.panelMinimum(side, this.fontScale), this.viewportWidth - this.globalRailWidth() - 360 -
       (side === 'left' ? (this.isTaskPanelVisible && !this.isWelcomePage && this.activeFeature !== 'trash' ? this.rightWidth + 16 : 8)
-        : (this.isLeftPanelVisible ? this.panelWidth('left') : this.railWidth()) + 16))
+        : (this.isLeftPanelVisible ? this.panelWidth('left') : 0) + 16))
     const result = SidebarService.resize(side, this.dragStartWidth, offset, Math.min(side === 'left' ? 400 : 420, maximum), this.fontScale)
     this.pendingPanelCollapse = result.collapsed ? side : ''
     if (side === 'left') this.leftWidth = result.width
@@ -838,7 +900,7 @@ struct Index {
     .animation({ duration: 160, curve: Curve.EaseOut })
   }
 
-  private sendMessage(prompt: string): void {
+  private sendMessage(prompt: string, reviewContext: string = ''): void {
     if (this.activeFeature === 'trash') return
     const message = prompt.trim() || (this.draftAttachments.length > 0 ? '请分析这些附件。' : '')
     if (message.length === 0 || this.thinking || this.recording || this.voiceBusy || this.attachmentBusy || this.actionBusy) return
@@ -855,13 +917,13 @@ struct Index {
     const gateway = IntegrationService.agent
     this.activeGateway = gateway
     const attachedContext = this.selectedContext.slice()
-    const attachments = this.draftAttachments.slice()
-    this.draftAttachments = []
+    const attachments = reviewContext ? [] : this.draftAttachments.slice()
+    if (!reviewContext) this.draftAttachments = []
     this.messages = [...this.messages, { role: 'user', content: message, meta: '现在', attachments: attachments }]
     this.messages = [...this.messages, { role: 'agent', content: '', meta: '正在检索资料', status: 'loading',
       sources: [], thinkingStartedAt: Date.now(), phase: 'retrieving' }]
     const replyIndex = this.messages.length - 1
-    this.inputText = ''
+    if (!reviewContext) this.inputText = ''
     this.notice = ''
     this.thinking = true
     this.persistSession()
@@ -873,7 +935,14 @@ struct Index {
     }, 50)
     let content = ''
     let sources: SourceCitation[] = []
-    const timeout = setTimeout(() => {
+    let waitingForSystem = false
+    let responseDeadline = Date.now() + ApiConfig.requestTimeoutMs + 3000
+    const timeout = setInterval(() => {
+      if (token !== this.requestSerial) { clearInterval(timeout); return }
+      // OS authorization and the user's review are not model network latency.
+      if (waitingForSystem) { responseDeadline = Date.now() + ApiConfig.requestTimeoutMs + 3000; return }
+      if (Date.now() < responseDeadline) return
+      clearInterval(timeout)
       uiContext.runScopedTask(() => {
         if (token !== this.requestSerial) return
         gateway.cancel()
@@ -885,7 +954,7 @@ struct Index {
         this.notice = timeoutMessage
         this.persistSession()
       })
-    }, ApiConfig.requestTimeoutMs + 3000)
+    }, 1000)
     const sink: StreamSink = new ChatStreamSink((): boolean => token !== this.requestSerial, (delta: string): void => {
       uiContext.runScopedTask(() => {
         if (token !== this.requestSerial) return
@@ -906,8 +975,13 @@ struct Index {
           this.notice = result.notice
           this.updateReply(replyIndex, '', `${gateway.name} · ${sources.length} 条参考资料`, 'loading', sources, 'connecting')
         })
-      }, attachedContext, attachments, workspace, (call: AgentToolCall): Promise<string> =>
-        this.executeWorkspaceTool(call, token, sessionId), this.features).then(() => {
+      }, attachedContext, attachments, workspace, (call: AgentToolCall): Promise<string> => {
+        waitingForSystem = ScheduleService.handles(call.name) || call.name === 'manage_agent_task'
+        return this.executeWorkspaceTool(call, token, sessionId).finally(() => {
+          if (waitingForSystem) responseDeadline = Date.now() + ApiConfig.requestTimeoutMs + 3000
+          waitingForSystem = false
+        })
+      }, this.features, reviewContext).then(() => {
         uiContext.runScopedTask(() => {
           if (token === this.requestSerial) this.updateReply(replyIndex, content || '服务未返回内容，请重试。', gateway.name, content ? 'complete' : 'error', sources)
         })
@@ -920,7 +994,7 @@ struct Index {
           }
         })
       }).finally(() => {
-        clearTimeout(timeout)
+        clearInterval(timeout)
         uiContext.runScopedTask(() => {
           if (token === this.requestSerial) {
             this.thinking = false
@@ -1112,6 +1186,7 @@ struct Index {
               this.apiModel = ''
               this.apiKey = ''
               IntegrationService.configureAgent({ baseUrl: '', model: '', apiKey: '' })
+              try { LocalAgentConfigService.saveRuntime(this.getUIContext().getHostContext() as common.UIAbilityContext, { baseUrl: '', model: '', apiKey: '' }) } catch (_error) {}
               this.apiConfigured = false
               this.apiNotice = '已清除外部模型配置。'
             })
@@ -1141,15 +1216,17 @@ struct Index {
       Row() {
         Column({ space: 4 }) {
           Text('为当前对话添加资料').fontSize(19 * this.fontScale).fontWeight(FontWeight.Medium).fontColor(UiTheme.text)
-          Text(`${this.knowledgeCount} 个资料片段 · 索引 ${this.knowledgeRevision}`).fontSize(12 * this.fontScale).fontColor(UiTheme.muted)
+          Text(`${this.knowledgeCount} 个资料片段 · 从资料库统一管理`).fontSize(12 * this.fontScale).fontColor(UiTheme.muted)
         }.alignItems(HorizontalAlign.Start).layoutWeight(1)
         Button('刷新').height(44).fontSize(12 * this.fontScale).fontColor(UiTheme.primary).backgroundColor(UiTheme.raised).interactive().onClick(() => this.refreshKnowledge())
       }.width('100%')
-      if (this.knowledgeRevision === 'demo-1') {
+      if (this.knowledgeRevision.includes('demo-1')) {
         Text('离线演示资料，不代表学校官方资料。').fontSize(12 * this.fontScale).fontColor('#666666').width('100%').padding(10).backgroundColor(UiTheme.raised).borderRadius(9).transition(TransitionEffect.OPACITY.animation({ duration: 160 }))
       }
       if (this.knowledgeCount === 0) {
-        Text('知识库尚未接入资料服务。可载入离线样例体验搜索和来源引用。').fontSize(13 * this.fontScale).fontColor(UiTheme.muted).lineHeight(21 * this.fontScale).width('100%')
+        Text('还没有可检索的文字资料。请到资料库导入，也可载入离线样例体验检索。').fontSize(13 * this.fontScale).fontColor(UiTheme.muted).lineHeight(21 * this.fontScale).width('100%')
+        Button('打开资料库').height(36 * this.fontScale).fontSize(12 * this.fontScale).fontColor(UiTheme.text).backgroundColor(UiTheme.raised)
+          .onClick(() => { this.contextPickerVisible = false; this.navigateSection('library') })
         Button('载入演示资料').height(44).fontSize(13 * this.fontScale).fontColor(UiTheme.onPrimary).backgroundColor(UiTheme.primary).interactive().onClick(() => this.loadDemoKnowledge())
       }
       Row({ space: 7 }) {
@@ -1338,8 +1415,6 @@ struct Index {
       if (this.isLeftPanelVisible) {
         Row({ space: 8 * this.fontScale }) {
           Row({ space: 8 * this.fontScale }) {
-          Text('C').fontSize(13 * this.fontScale).fontWeight(FontWeight.Medium).fontColor('#E4E4E4').width(25 * this.fontScale).height(25 * this.fontScale)
-            .textAlign(TextAlign.Center).padding({ top: 3 * this.fontScale }).backgroundColor('#303030').borderRadius(7 * this.fontScale)
           Text('CampusPilot').fontSize(14 * this.fontScale).fontColor('#E1E1E1').layoutWeight(1)
             .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis })
           }.layoutWeight(1).height(34 * this.fontScale).borderRadius(7 * this.fontScale).id('brand-home').accessibilityText('CampusPilot，返回首页')
@@ -1422,7 +1497,6 @@ struct Index {
             }
           }.width('100%').alignItems(HorizontalAlign.Start).padding({ bottom: 14 * this.fontScale, right: 12 * this.fontScale })
         }.layoutWeight(1).width('100%').align(Alignment.TopStart).scrollBar(BarState.Auto).scrollBarWidth(3).scrollBarColor('#666666')
-        this.SettingsEntry()
         Row({ space: 7 * this.fontScale }) {
           Text('●').fontSize(8 * this.fontScale).fontColor(this.apiConfigured ? '#999999' : '#737373')
           Text(this.apiConfigured ? '模型已配置' : '尚未配置模型').fontSize(10 * this.fontScale).fontColor('#858585').layoutWeight(1)
@@ -1430,7 +1504,7 @@ struct Index {
         }.height(32 * this.fontScale).width('100%').padding({ left: 8 * this.fontScale, right: 8 * this.fontScale }).margin({ top: 6 * this.fontScale })
       } else {
         Button({ type: ButtonType.Normal }) { Image($r('app.media.ic_sidebar')).width(21 * this.fontScale).height(21 * this.fontScale) }
-          .width(36 * this.fontScale).height(38 * this.fontScale).padding(0).backgroundColor(Color.Transparent).id('sidebar-expand').accessibilityText('展开左侧边栏')
+          .width(36 * this.fontScale).height(38 * this.fontScale).padding(0).backgroundColor(Color.Transparent).id('sidebar-legacy-expand').accessibilityText('展开左侧边栏')
           .interactive().onClick(() => this.toggleLeftPanel())
         if (this.sidebarSelection === 'section-conversations') {
           Button({ type: ButtonType.Normal }) { Image($r('app.media.ic_more_horizontal')).width(21 * this.fontScale).height(21 * this.fontScale) }
@@ -1444,7 +1518,6 @@ struct Index {
             .interactive().onClick(() => this.sidebarSelection = 'section-conversations')
         }
         Blank()
-        this.SettingsEntry()
         Text('C').fontSize(13 * this.fontScale).fontColor('#999999').height(32 * this.fontScale).width(36 * this.fontScale).textAlign(TextAlign.Center)
           .id('brand-home-rail').accessibilityText('CampusPilot，返回首页').interactive().onClick(() => this.openHome())
       }
@@ -1457,12 +1530,9 @@ struct Index {
   @Builder
   SettingsEntry() {
     Button({ type: ButtonType.Normal }) {
-      Row({ space: 9 * this.fontScale }) {
-        Image($r('app.media.ic_settings')).width(18 * this.fontScale).height(18 * this.fontScale)
-        if (this.isLeftPanelVisible) { Text('设置').fontSize(12 * this.fontScale).fontColor('#BBBBBB') }
-      }.width('100%')
-    }.width(this.isLeftPanelVisible ? '100%' : 36 * this.fontScale).height(38 * this.fontScale).padding({ left: 9 * this.fontScale, right: 8 * this.fontScale })
-      .backgroundColor(Color.Transparent).borderRadius(7 * this.fontScale).id('appearance-settings').accessibilityText('设置字号')
+      Image($r('app.media.ic_settings')).width(20 * this.fontScale).height(20 * this.fontScale).colorFilter(this.railIconFilter(false, 102))
+    }.width('100%').height(44 * Math.max(1, this.fontScale)).padding(0)
+      .backgroundColor(Color.Transparent).borderRadius(7 * this.fontScale).id('appearance-settings').accessibilityText('设置')
       .interactive().onClick(() => this.appearanceSettingsVisible = true)
       .bindSheet($$this.appearanceSettingsVisible, this.AppearanceSettings(), { height: 420, width: 500,
         preferType: SheetType.CENTER, showClose: false, dragBar: false })
@@ -1472,7 +1542,7 @@ struct Index {
   AppearanceSettings() {
     Column({ space: 18 }) {
       Row() {
-        Text('显示设置').fontSize(20 * this.fontScale).fontWeight(FontWeight.Medium).fontColor(UiTheme.text).layoutWeight(1)
+        Text('设置').fontSize(20 * this.fontScale).fontWeight(FontWeight.Medium).fontColor(UiTheme.text).layoutWeight(1)
         Button('完成').fontSize(13 * this.fontScale).height(36).backgroundColor(UiTheme.raised).fontColor(UiTheme.primary)
           .id('appearance-settings-close').onClick(() => { this.persistSidebar(); this.appearanceSettingsVisible = false })
       }.width('100%')
@@ -1707,9 +1777,79 @@ struct Index {
         preferType: SheetType.CENTER, showClose: false, dragBar: false })
   }
 
+  private navigateSection(section: string): void {
+    if (this.appSection === section) return
+    this.stopReply(); this.persistSession(); this.cancelVoice(); this.stopSpeech()
+    this.contextPickerVisible = false; this.artifactVisible = false
+    this.appSection = section
+    if (section === 'library') this.refreshKnowledge()
+  }
+
+  private useLibraryDocument(id: string, attachment: boolean): void {
+    try {
+      if (this.activeFeature === 'trash') this.openHome()
+      const library = IntegrationService.library
+      if (library === undefined) throw new Error('资料库尚未初始化。')
+      if (attachment) {
+        if (this.draftAttachments.length >= AttachmentService.maxFiles) throw new Error('每条消息最多4个附件。')
+        this.draftAttachments = this.draftAttachments.concat(library.attachment(id))
+      } else {
+        const incoming = library.citations(id)
+        const sourceIds = new Set(incoming.map((source: SourceCitation) => source.sourceId))
+        const retained = this.selectedContext.filter((source: SourceCitation) => !sourceIds.has(source.sourceId))
+        if (retained.length + incoming.length > 12) throw new Error('当前上下文较多，请先移除部分资料后再添加。')
+        this.selectedContext = retained.concat(incoming)
+      }
+      this.appSection = 'chat'; this.notice = attachment ? '已加入附件，发送消息后使用。' : '已加入当前对话上下文，发送消息后使用。'
+      this.persistSession()
+    } catch (error) {
+      try { this.getUIContext().getPromptAction().showToast({ message: (error as Error).message, duration: 2000 }) } catch (_error) {}
+    }
+  }
+
+  private railIconFilter(active: boolean = false, source: number = 85): ColorFilter {
+    const scale = (active ? 241 : 189) / source
+    return new ColorFilter([scale, 0, 0, 0, 0, 0, scale, 0, 0, 0, 0, 0, scale, 0, 0, 0, 0, 0, 1, 0])
+  }
+
+  @Builder
+  RailItem(label: string, section: string, icon: Resource) {
+    Button({ type: ButtonType.Normal }) {
+      Image(icon).width(22 * this.fontScale).height(22 * this.fontScale).colorFilter(this.railIconFilter(this.appSection === section))
+    }.width('100%').height(44 * Math.max(1, this.fontScale)).padding(0).borderRadius(9 * this.fontScale)
+      .backgroundColor(this.appSection === section ? '#3B3B3B' : Color.Transparent).id(`nav-${section}`).accessibilityText(label)
+      .interactive().onClick(() => {
+        if (section === 'chat') this.openHome()
+        else { if (section === 'tasks') this.taskCenterTab = 'agent'; this.navigateSection(section) }
+      })
+  }
+
+  @Builder
+  GlobalRail() {
+    Column({ space: 6 * this.fontScale }) {
+      this.RailItem('首页', 'chat', $r('app.media.ic_home'))
+      this.RailItem('定时任务', 'tasks', $r('app.media.ic_clock'))
+      this.RailItem('资料库', 'library', $r('app.media.ic_library'))
+      if (this.appSection === 'chat' && !this.isLeftPanelVisible) {
+        Button({ type: ButtonType.Normal }) { Image($r('app.media.ic_sidebar')).width(20 * this.fontScale).height(20 * this.fontScale) }
+          .width('100%').height(37 * this.fontScale).backgroundColor(Color.Transparent).id('sidebar-expand')
+          .accessibilityText('展开会话侧栏').interactive().onClick(() => this.toggleLeftPanel())
+      }
+      Blank()
+      this.SettingsEntry()
+    }.width(this.globalRailWidth()).height('100%').padding({ left: 6, right: 6, top: 19 * this.fontScale, bottom: 14 * this.fontScale })
+      .backgroundColor('#242424').border({ width: { right: 1 }, color: '#333333' }).id('global-navigation')
+  }
+
   build() {
     Row() {
-      this.SidebarContent()
+      this.GlobalRail()
+      if (this.appSection === 'tasks') {
+        TaskCenterPage({ initialTab: this.taskCenterTab }).layoutWeight(1)
+      } else if (this.appSection === 'library') {
+        LibraryPage({ onUse: (id: string, attachment: boolean) => this.useLibraryDocument(id, attachment), onChanged: () => this.refreshKnowledge() }).layoutWeight(1)
+      } else {
+      if (this.isLeftPanelVisible) { this.SidebarContent() }
       if (this.isLeftPanelVisible) { this.ResizeHandle('left') }
 
       Column() {
@@ -1861,6 +2001,7 @@ struct Index {
           onDisappear: () => { this.apiSettingsVisible = false } })
 
       if (this.isTaskPanelVisible && !this.isWelcomePage && this.activeFeature !== 'trash') { this.ResizeHandle('right'); this.TaskPanel() }
+      }
     }.width('100%').height('100%').backgroundColor(UiTheme.background)
       .onAreaChange((_oldArea: Area, newArea: Area) => { this.viewportWidth = Number.parseFloat(`${newArea.width}`) || 1280 })
       .bindSheet($$this.contextPickerVisible, this.ContextSheet(), { height: '80%', width: 680,

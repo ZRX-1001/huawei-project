@@ -65,7 +65,10 @@ assert.ok(request.systemInstruction.includes('课程资料与学习计划助手'
 assert.ok(request.systemInstruction.includes('准备期中考试'));
 assert.ok(request.systemInstruction.includes('周三前完成'));
 assert.ok(request.systemInstruction.includes('人工修改'));
-assert.equal(request.tools.length, 4);
+assert.equal(request.tools.length, 14);
+assert.ok(request.tools.some(tool => tool.function.name === 'manage_agent_task'));
+assert.ok(request.tools.some(tool => tool.function.name === 'create_calendar_event'));
+assert.ok(request.tools.some(tool => tool.function.name === 'create_system_reminder'));
 assert.equal(ChatService.request('hello', 'home', [], { context: '' }).tools, undefined, 'old integrations need no tools');
 const dynamic = [{ id: 'home', name: '智能助理' }, { id: 'custom', name: '毕业设计', description: '论文课题与答辩', prompt: '帮助整理论文与答辩材料。' }, { id: 'trash', name: '回收站' }];
 assert.deepEqual(Array.from(service.tools(dynamic)[2].function.parameters.properties.featureId.enum), ['home', 'custom']);

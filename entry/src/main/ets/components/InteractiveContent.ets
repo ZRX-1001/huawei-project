@@ -21,7 +21,7 @@ export struct InteractiveContent {
   private notes(): string { return InteractionService.value(this.feedback, 'notes') }
   private emit(change: InteractionChange): void {
     this.onInteraction({ controlId: change.controlId, value: change.value, reset: change.reset,
-      sessionId: this.sessionId, documentId: this.documentId })
+      sessionId: this.sessionId, documentId: this.documentId, submit: change.submit })
   }
 
   @Styles
@@ -44,13 +44,13 @@ export struct InteractiveContent {
         documentId: this.documentId, feedback: this.feedback, layout: InteractionService.layout(this.content),
         onInteraction: (change: InteractionChange) => this.emit(change) })
       Flex({ wrap: FlexWrap.Wrap }) {
-        Button(this.decision() === 'confirmed' ? '✓ 已确认内容' : '确认内容').height(28 * this.fontScale).fontSize((this.compact ? 10 : 11) * this.fontScale)
+        Button(this.decision() === 'confirmed' ? '再次检查' : '确认内容').height(28 * this.fontScale).fontSize((this.compact ? 10 : 11) * this.fontScale)
           .fontWeight(FontWeight.Regular).borderRadius(7 * this.fontScale).padding({ left: 12 * this.fontScale, right: 12 * this.fontScale, top: 0, bottom: 0 })
           .fontColor(this.decision() === 'confirmed' ? UiTheme.onPrimary : UiTheme.primary)
           .backgroundColor(this.decision() === 'confirmed' ? UiTheme.primary : UiTheme.raised).margin({ right: 6 * this.fontScale, bottom: 5 * this.fontScale })
           .enabled(this.editable).id(InteractionService.elementId(this.documentId, 'confirm'))
-          .accessibilityText('确认这份内容，仅记录本地确认').actionFeedback()
-          .onClick(() => this.emit({ controlId: 'decision', value: this.decision() === 'confirmed' ? 'none' : 'confirmed' }))
+          .accessibilityText('提交当前填写内容，让Agent检查并回复').actionFeedback()
+          .onClick(() => { this.editing = false; this.emit({ controlId: 'decision', value: 'confirmed', submit: true }) })
         Button(this.decision() === 'needs_changes' ? '✓ 需要调整' : '需要调整').height(28 * this.fontScale).fontSize((this.compact ? 10 : 11) * this.fontScale)
           .fontWeight(FontWeight.Regular).borderRadius(7 * this.fontScale).padding({ left: 12 * this.fontScale, right: 12 * this.fontScale, top: 0, bottom: 0 })
           .fontColor(this.decision() === 'needs_changes' ? UiTheme.onPrimary : UiTheme.primary)
@@ -74,7 +74,7 @@ export struct InteractiveContent {
       }
       if (this.feedback.updatedAt > 0) {
         Row({ space: 8 * this.fontScale }) {
-          Text(this.feedback.values.length > 0 ? '反馈会在继续对话或下一步时带给 Agent' : '已重置此前反馈')
+          Text(this.feedback.values.length > 0 ? '填写自动保存；确认内容后由 Agent 检查并回复' : '已重置此前反馈')
             .fontSize(10 * this.fontScale).fontColor(UiTheme.muted).layoutWeight(1)
           if (this.feedback.values.length > 0) {
             Button('重置反馈').height(24 * this.fontScale).borderRadius(6 * this.fontScale).padding({ left: 10 * this.fontScale, right: 10 * this.fontScale, top: 0, bottom: 0 }).fontSize(10 * this.fontScale).fontColor(UiTheme.secondary).backgroundColor(UiTheme.raised)

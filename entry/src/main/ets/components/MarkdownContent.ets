@@ -92,30 +92,35 @@ export struct MarkdownContent {
           Scroll() {
             Column() {
               ForEach(block.rows, (row: MarkdownRow, rowIndex: number) => {
-                Row() {
+                Flex({ alignItems: ItemAlign.Stretch }) {
                   ForEach(row.cells, (cell: string, column: number) => {
-                    if (this.interactive && InteractionService.inlineTokens(this.layout, `${blockIndex}:${rowIndex}:${column}`).length > 0) {
-                      InlineFormContent({ tokens: InteractionService.inlineTokens(this.layout, `${blockIndex}:${rowIndex}:${column}`),
-                        documentId: this.documentId, textSize: 13, editable: this.editable, feedback: this.feedback,
-                        onInteraction: this.onInteraction }).width(184 * this.fontScale).padding(10 * this.fontScale)
-                    } else if (this.interactive && (this.editTables || InteractionService.isPlaceholder(cell)) && rowIndex > 0 && this.layout.cells[`${blockIndex}:${rowIndex}:${column}`] !== undefined) {
-                      TextInput({ text: this.cellInputValue(blockIndex, rowIndex, column), placeholder: '填写信息' }).placeholderFont({ size: 13 * this.fontScale })
-                        .width(184 * this.fontScale).height(36 * this.fontScale).maxLength(1000).fontSize(13 * this.fontScale).fontColor(UiTheme.text).backgroundColor(UiTheme.surface)
-                        .caretColor(UiTheme.primary).selectedBackgroundColor('#DDDDDD')
-                        .padding({ left: 10 * this.fontScale, right: 10 * this.fontScale, top: 3 * this.fontScale, bottom: 3 * this.fontScale }).enabled(this.editable)
-                        .id(InteractionService.elementId(this.documentId, this.layout.cells[`${blockIndex}:${rowIndex}:${column}`].id))
-                        .accessibilityText(this.layout.cells[`${blockIndex}:${rowIndex}:${column}`].label)
-                        .onChange((value: string) => this.onInteraction({ controlId: this.layout.cells[`${blockIndex}:${rowIndex}:${column}`].id, value: value }))
-                    } else {
-                      MarkdownInline({ text: this.interactive && rowIndex > 0 ? this.cellValue(blockIndex, rowIndex, column, cell) : cell,
-                        textSize: 13, strong: rowIndex === 0 }).width(184 * this.fontScale).padding(10 * this.fontScale)
-                    }
+                    Column() {
+                      if (this.interactive && InteractionService.inlineTokens(this.layout, `${blockIndex}:${rowIndex}:${column}`).length > 0) {
+                        InlineFormContent({ tokens: InteractionService.inlineTokens(this.layout, `${blockIndex}:${rowIndex}:${column}`),
+                          documentId: this.documentId, textSize: 13, editable: this.editable, feedback: this.feedback,
+                          onInteraction: this.onInteraction }).width('100%')
+                      } else if (this.interactive && (this.editTables || InteractionService.isPlaceholder(cell)) && rowIndex > 0 && this.layout.cells[`${blockIndex}:${rowIndex}:${column}`] !== undefined) {
+                        TextInput({ text: this.cellInputValue(blockIndex, rowIndex, column), placeholder: '填写信息' }).placeholderFont({ size: 13 * this.fontScale })
+                          .width('100%').height(28 * this.fontScale).maxLength(1000).fontSize(13 * this.fontScale).fontColor(UiTheme.text).backgroundColor(UiTheme.surface)
+                          .caretColor(UiTheme.primary).selectedBackgroundColor('#DDDDDD')
+                          .padding({ left: 4 * this.fontScale, right: 4 * this.fontScale, top: 0, bottom: 0 }).enabled(this.editable)
+                          .id(InteractionService.elementId(this.documentId, this.layout.cells[`${blockIndex}:${rowIndex}:${column}`].id))
+                          .accessibilityText(this.layout.cells[`${blockIndex}:${rowIndex}:${column}`].label)
+                          .onChange((value: string) => this.onInteraction({ controlId: this.layout.cells[`${blockIndex}:${rowIndex}:${column}`].id, value: value }))
+                      } else {
+                        MarkdownInline({ text: this.interactive && rowIndex > 0 ? this.cellValue(blockIndex, rowIndex, column, cell) : cell,
+                          textSize: 13, strong: rowIndex === 0 }).width('100%')
+                      }
+                    }.width(184 * this.fontScale).flexShrink(0).constraintSize({ minHeight: 42 * this.fontScale })
+                      .padding({ left: 10 * this.fontScale, right: 10 * this.fontScale, top: 8 * this.fontScale, bottom: 8 * this.fontScale })
+                      .justifyContent(FlexAlign.Center).alignItems(HorizontalAlign.Start)
+                      .border({ width: { right: column < row.cells.length - 1 ? 1 : 0 }, color: UiTheme.border })
                   }, (cell: string, index: number) => `${index}-${cell}`)
-                }.alignItems(VerticalAlign.Top).width(block.rows[0].cells.length * 184 * this.fontScale)
+                }.width(block.rows[0].cells.length * 184 * this.fontScale)
                   .backgroundColor(rowIndex === 0 ? UiTheme.raised : rowIndex % 2 === 0 ? UiTheme.raised : UiTheme.surface)
-                  .border({ width: { bottom: 1 }, color: UiTheme.border })
+                  .border({ width: { bottom: rowIndex < block.rows.length - 1 ? 1 : 0 }, color: UiTheme.border })
               }, (row: MarkdownRow, index: number) => `${index}-${JSON.stringify(row)}`)
-            }.border({ width: 1, color: UiTheme.border }).borderRadius(6 * this.fontScale)
+            }.border({ width: 1, color: UiTheme.border }).borderRadius(6 * this.fontScale).clip(true)
           }.scrollable(ScrollDirection.Horizontal).width('100%').scrollBar(BarState.Auto)
         } else if (this.interactive && InteractionService.inlineTokens(this.layout, `${blockIndex}`).length > 0) {
           InlineFormContent({ tokens: InteractionService.inlineTokens(this.layout, `${blockIndex}`), documentId: this.documentId, textSize: this.textSize,

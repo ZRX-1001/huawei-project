@@ -41,6 +41,17 @@ export interface InteractionChange {
   reset?: boolean
   sessionId?: string
   documentId?: string
+  submit?: boolean
+}
+
+export interface InteractionReviewField {
+  id: string
+  label: string
+  kind: string
+  value: string
+  userEdited: boolean
+  empty: boolean
+  group?: string
 }
 
 export interface InteractionLayout {

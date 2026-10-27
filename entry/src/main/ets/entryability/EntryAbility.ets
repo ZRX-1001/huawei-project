@@ -3,6 +3,7 @@ import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
 import { SessionService } from '../services/SessionService';
 import { IntegrationService } from '../services/IntegrationService';
+import { AgentTaskRuntime } from '../services/AgentTaskRuntime';
 
 const DOMAIN = 0x0000;
 
@@ -18,6 +19,7 @@ export default class EntryAbility extends UIAbility {
   }
 
   onDestroy(): void {
+    AgentTaskRuntime.background();
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onDestroy');
   }
 
@@ -40,11 +42,13 @@ export default class EntryAbility extends UIAbility {
   }
 
   onForeground(): void {
+    AgentTaskRuntime.foreground(this.context);
     // Ability has brought to foreground
     hilog.info(DOMAIN, 'testTag', '%{public}s', 'Ability onForeground');
   }
 
   onBackground(): void {
+    AgentTaskRuntime.background();
     SessionService.flush();
     IntegrationService.voice.cancel().catch(() => {});
     IntegrationService.voice.stopSpeaking().catch(() => {});

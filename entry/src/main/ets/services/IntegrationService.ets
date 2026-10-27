@@ -6,6 +6,9 @@ import { AgentApiSettings } from '../config/ApiConfig'
 import { OpenAiCompatibleGateway } from './OpenAiCompatibleGateway'
 import { common } from '@kit.AbilityKit'
 import { HarmonyVoiceAdapter } from './HarmonyVoiceAdapter'
+import { HarmonyScheduleAdapter } from './HarmonyScheduleAdapter'
+import { SchedulePlatform } from '../models/ScheduleModels'
+import { LibraryService } from './LibraryService'
 
 // 可运行的离线摘录模式，不冒充已经接入真实大模型。
 export class ExtractiveGateway implements AgentGateway {
@@ -44,12 +47,22 @@ export class UnavailableVoice implements VoiceAdapter {
 export class IntegrationService {
   static knowledge: KnowledgeRepository = new MemoryKnowledgeRepository()
   static embedder: QueryEmbedder | undefined = undefined
+  static library: LibraryService | undefined = undefined
+  static initializeLibrary(context: common.Context): void {
+    if (IntegrationService.library !== undefined) return
+    const library = new LibraryService(context.filesDir, IntegrationService.knowledge)
+    IntegrationService.library = library; IntegrationService.knowledge = library
+  }
   static agent: AgentGateway = new OpenAiCompatibleGateway({ baseUrl: '', model: '', apiKey: '' })
   static agentSettings: AgentApiSettings = { baseUrl: '', model: '', apiKey: '' }
   static forms: ModuleAdapter = new UnavailableModule('表单')
   static study: ModuleAdapter = new UnavailableModule('学习课程')
   static hardware: ModuleAdapter = new UnavailableModule('自律魔方')
   static voice: VoiceAdapter = new UnavailableVoice()
+  static schedule: SchedulePlatform | undefined = undefined
+  static initializeSchedule(context: common.UIAbilityContext): void {
+    if (IntegrationService.schedule === undefined) IntegrationService.schedule = new HarmonyScheduleAdapter(context)
+  }
   static initializeVoice(context: common.UIAbilityContext): void {
     if (IntegrationService.voice instanceof UnavailableVoice) IntegrationService.voice = new HarmonyVoiceAdapter(context)
   }

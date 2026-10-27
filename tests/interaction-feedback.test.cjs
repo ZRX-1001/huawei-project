@@ -140,6 +140,20 @@ assert.equal(interaction.inputValue(formRecord, blanks[0]), '2026-11-01');
 assert.ok(interaction.context(formRecords, { 'message-form': form }).includes('2026-11-01'));
 console.log('PASS: inline form blanks, Unicode choices, mutually exclusive selections, independent multi-select and literal Markdown.');
 
+const emptyReview = JSON.parse(interaction.review(form, interaction.empty('message-form')));
+assert.ok(emptyReview.fields.filter(f => f.id.includes('-blank-')).every(f => f.empty && !f.userEdited), 'untouched blanks reach the agent as empty');
+const filledReview = JSON.parse(interaction.review(form, formRecord));
+assert.equal(filledReview.fields.find(f => f.id === blanks[0].id).value, '2026-11-01');
+assert.equal(filledReview.fields.find(f => f.id === blanks[0].id).userEdited, true);
+assert.ok(filledReview.fields.some(f => f.kind === 'check' && f.value === 'false'), 'unselected options remain visible to the reviewer');
+assert.ok(filledReview.content.includes('___'), 'review includes source layout even when the original is outside recent history');
+const reviewRequest = ChatService.request('检查我提交的表单', 'home', recentHistory, { context: '', sources: [] }, [], state, async () => '{}', undefined, JSON.stringify(filledReview));
+assert.ok(reviewRequest.systemInstruction.includes('2026-11-01'));
+assert.ok(reviewRequest.systemInstruction.includes('未填写或仅部分填写'));
+assert.ok(reviewRequest.systemInstruction.includes('点击确认本身不代表字段齐全'));
+assert.equal(reviewRequest.history.length, 12);
+console.log('PASS: explicit form review carries all blank/filled/check values and full source independently of recent history.');
+
 const manyForms = interaction.layout(Array.from({length: 200}, (_, i) => `字段${i}：___`).join('\n\n'));
 assert.equal(manyForms.controls.length, 160);
 assert.equal(Object.values(manyForms.inline).flat().filter(t => t.control).length, 158);

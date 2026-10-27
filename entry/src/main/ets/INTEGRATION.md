@@ -15,6 +15,28 @@
 
 请将一份索引版本的全部片段一次传给 repository，避免生成过程读到正在更新的索引。空文档、空片段和重复 ID 会被检索过滤。演示索引中的课程资料仅供离线演示，并不代表学校官方资料。
 
+## 系统日程工具与持久备忘录
+
+全局页面由 `Index.appSection` 切换，`GlobalRail` 始终显示；`TaskCenterPage` 承载日历、提醒、备忘录与 `AgentTaskPage`，`LibraryPage` 统一管理资料。普通会话保持独立状态，不用特殊工作区模拟这些页面。
+
+`LibraryService` 包装原有 `KnowledgeRepository`，组合已启用的外部片段和持久化本地资料，实现 `snapshot()`；`IntegrationService.knowledge` 指向该组合仓库。文件迁移/导入复制到 `library_files`，发送附件再次复制到 `chat_attachments`，两者生命周期独立。文本按800字符、120重叠分段；JSON索引校验后保留向量及模型标识，命名空间前缀隔离片段ID。图片无文本索引。`library.json` 保存开关、正文、元数据和删除标记，禁止旧会话重新导入已删除源。
+
+`AgentTaskService/Store` 管理周期、状态及最近5次结果；`LocalJsonStore` 使用原子替换、同步备份和短时目录锁。`AgentTaskRuntime` 前台轮询到期任务，并注册一个2小时周期的系统延迟任务；`AgentTaskAbility` 在后台回调时认领到期任务。实际唤醒受系统活跃分组等策略控制，不能作为准时闹钟。跨进程认领先落盘 `runId/runningSince`，周期推进后才调用模型，重复到期合并一次，过期执行记录为中断，旧回调不能覆盖新结果或复活已删除任务。
+
+自动执行最多85秒；工具白名单只有读时间、日历、提醒和本地备忘录的list/read，服务端分派也校验，不能靠模型遵循提示词来保护写操作。后台只检查现有日历授权，不弹窗。普通对话额外提供 `manage_agent_task` 管理任务，执行前展示时间/周期核对；API配置存设备私有首选项供后台读取，清空后不自动复活打包配置。
+
+`ScheduleService` 提供独立于平台的参数校验和9个工具契约；`HarmonyScheduleAdapter` 实现 `SchedulePlatform`，在聊天页初始化并与原有4个工作区工具一起提供给模型。系统工具对所有现有工作区可用，`Index.executeWorkspaceTool` 优先分派这些调用，实际结果作为 `role: tool` 返回给模型。
+
+- `get_system_time`：设备当前时间、IANA时区、UTC偏移。请求初始上下文也包含设备时间。
+- `query_calendar_events`：查询授权日历中的事件实例，单次最多31天、返回100项；部分日历失败或截断标记 `partial`，不把部分读取当作无冲突。
+- `create_calendar_event`、`update_calendar_event`、`delete_calendar_event`：真实日历写操作，使用 `calendarId/eventId` 定位；更新保留未修改字段，同标题同起止时间不重复创建。重复日程不直接修改整个系列。
+- `create_system_reminder`：`alarm/calendar/timer` 三种系统代理提醒；`list_system_reminders`、`cancel_system_reminder` 仅管理本应用发布的提醒。系统时钟应用的闹钟不在可访问范围内。
+- `manage_memo`：`list/read/save/delete/share`，本地跨会话保存。列表返回400字预览，修改前按ID读取全文，避免把预览覆盖成完整正文。`MemoStore` 原子替换与备份恢复；备份同步删除状态。分享使用官方 `Share Kit`，返回 `status=share_opened` 仅说明入口已打开，不能声称目标应用已经保存。
+
+所有日期工具参数要求带时区的 ISO8601；星期为周一1到周日7，闹钟时刻按设备本地时间，日期提醒精确到未来整分钟。日历读写按需请求权限，代理提醒检查通知授权。写操作展示实际对象与内容核对；用户取消、停止生成、会话切换或权限请求后调用失效时不继续写。已经执行的系统操作不能通过取消网络请求撤销，需再次查询系统列表。
+
+`SystemSchedulePanel` 是独立的设置窗口入口，不依赖模型即可查询/管理日程、提醒和备忘录。系统能力、权限与代理提醒权益失败都返回 `ok=false`，不会静默改用其他类型的提醒。只申请读写日历及发布代理提醒权限，不申请读取全部私有日历的受限权限。官方能力说明：[Calendar Kit](https://developer.huawei.com/consumer/cn/doc/harmonyos-references/js-apis-calendarmanager)、[代理提醒限制](https://developer.huawei.com/consumer/cn/doc/harmonyos-guides/agent-powered-reminder)。
+
 ## Agent 消息流
 
 聊天页底部的“配置外部模型 API”可连接 OpenAI Chat Completions 兼容服务。填写服务根地址（例如 `https://api.example.com/v1`）、模型名称和可选 API Key；可选 Key 适用于本地或无鉴权服务。应用会在请求时拼接 `/chat/completions`，发送系统指令、当前功能 ID、最近 12 条历史（每条最多 4000 字符）、当前问题及合并后的检索资料。`ohos.permission.INTERNET` 已在 entry 模块声明。
@@ -33,7 +55,7 @@ rawfile 会被打入 HAP，因此 Git 忽略只保护密钥不进入仓库，不
 
 外部模型适配器为 `OpenAiCompatibleGateway`，实现 `AgentGateway.generate(request, sink)`。适配器对 `request.retrieval.context` 必须按**不可信资料**处理；只给有资料支持的句子加 `[编号]`，缺少证据时明确说明。默认配置为空，未填写服务地址和模型前不会假装生成成功。
 
-当前兼容适配器通过 `requestInStream` 接收 OpenAI SSE 流，并在每个 `dataReceive` 事件中解析 `choices[0].delta.content`，通过 `sink.onDelta` 立即更新聊天气泡；部分不支持流式的兼容服务会自动回退读取完整 JSON 回答。用户取消、切换页面或等待超过 93 秒时，UI 会调用 `AgentGateway.cancel()` 销毁进行中的 HTTP 请求。复杂问题会被提示以简短的“思路摘要”说明任务拆解和关键依据，不展示逐字内部推演。
+当前兼容适配器通过 `requestInStream` 接收 OpenAI SSE 流，并在每个 `dataReceive` 事件中解析 `choices[0].delta.content`，通过 `sink.onDelta` 立即更新聊天气泡；部分不支持流式的兼容服务会自动回退读取完整 JSON 回答。用户取消、切换页面或等待模型超过 93 秒时，UI 会调用 `AgentGateway.cancel()` 销毁进行中的 HTTP 请求。等待系统工具、授权或核对窗口期间暂停模型超时计时，系统操作返回后重新计时。复杂问题会被提示以简短的“思路摘要”说明任务拆解和关键依据，不展示逐字内部推演。
 
 ## 回答排版与思路摘要
 

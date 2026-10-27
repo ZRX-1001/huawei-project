@@ -1,5 +1,5 @@
 import { MarkdownParser } from './MarkdownParser'
-import { InteractionChange, InteractionContextRecord, InteractionContextValue, InteractionControl, InteractionLayout, InteractionRecord, InteractionValue, InteractionToken } from '../models/InteractionModels'
+import { InteractionChange, InteractionContextRecord, InteractionContextValue, InteractionControl, InteractionLayout, InteractionRecord, InteractionValue, InteractionToken, InteractionReviewField } from '../models/InteractionModels'
 
 // User feedback stays separate from generated Markdown and model-owned tasks.
 export class InteractionService {
@@ -182,6 +182,19 @@ export class InteractionService {
 
   static elementId(documentId: string, controlId: string): string {
     return `interaction-${documentId}-${controlId}`.replace(/[^A-Za-z0-9_-]/g, '-')
+  }
+
+  static review(content: string, record: InteractionRecord): string {
+    const fields = InteractionService.layout(content).controls.filter((control: InteractionControl) =>
+      control.id !== 'decision' && control.id !== 'notes').map((control: InteractionControl): InteractionReviewField => {
+      const value = control.kind === 'text' ? InteractionService.inputValue(record, control) : InteractionService.controlValue(record, control)
+      return { id: control.id, label: control.label, kind: control.kind, value: value,
+        userEdited: record.values.some((item: InteractionValue) => item.id === control.id),
+        empty: control.kind === 'text' && !value.trim(), group: control.group }
+    })
+    return JSON.stringify({ documentId: record.id, title: record.title, submittedAt: Date.now(), content: content.slice(0, 16000),
+      fields: fields, notes: InteractionService.value(record, 'notes'),
+      versionStatus: InteractionService.isPreviousVersion(record, content) ? 'previous' : 'current' })
   }
 
   private static validValue(kind: string, value: string): boolean {
