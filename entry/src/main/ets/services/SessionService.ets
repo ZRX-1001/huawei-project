@@ -6,6 +6,8 @@ import { FEATURE_CATALOG } from '../config/FeatureCatalog'
 import { SourceCitation } from '../models/RagModels'
 import { WorkspaceState } from '../models/WorkspaceModels'
 import { SidebarPreferences } from '../models/SidebarModels'
+import { ExecutionRecord } from '../models/ExecutionModels'
+import { ExecutionTraceService } from './ExecutionTraceService'
 
 export interface SessionSummary {
   id: string
@@ -62,10 +64,13 @@ export class SessionService {
     SessionService.archive = loaded
     loaded.sessions.forEach((session: ChatSession) => {
       session.messages.forEach((message: AgentMessage) => {
+        message.executions = ExecutionTraceService.restore(message.executions)
         if (message.status === 'loading' || message.status === 'streaming') {
-          if (message.thinkingStartedAt !== undefined) {
-            message.thinkingDurationMs = Math.max(0, session.updatedAt - message.thinkingStartedAt)
-          }
+          const end = Number.isFinite(message.thinkingLastActiveAt) ? message.thinkingLastActiveAt! : session.updatedAt
+          const settled = ExecutionTraceService.settle(message, 'stopped', end)
+          message.thinkingDurationMs = settled.thinkingDurationMs
+          message.thinkingLastActiveAt = settled.thinkingLastActiveAt
+          message.executions = settled.executions
           message.content = message.status === 'loading' ? '上次生成已中断，可以继续发送消息。' : message.content
           message.status = 'stopped'
           message.meta = '上次生成已中断'
@@ -249,6 +254,21 @@ export class SessionService {
     session.messages = SessionService.copy(messages)
     session.updatedAt = Date.now()
     SessionService.schedule(immediate)
+  }
+
+  static recordExecution(id: string, executionId: string, record: ExecutionRecord): AgentMessage | undefined {
+    const session = SessionService.archive.sessions.find((item: ChatSession) => item.id === id)
+    if (!session) return undefined
+    const index = session.messages.findIndex((message: AgentMessage) => message.executionId === executionId && message.role === 'agent')
+    if (index < 0) return undefined
+    const message = SessionService.copy([session.messages[index]])[0]
+    message.executions = ExecutionTraceService.upsert(message.executions, record)
+    if (!ExecutionTraceService.terminal(message.status)) message.thinkingLastActiveAt = Date.now()
+    message.renderRevision = (message.renderRevision || 0) + 1
+    session.messages[index] = message
+    // A late receipt belongs to its original reply; never activate or resurrect a conversation.
+    SessionService.schedule(true)
+    return SessionService.copy([message])[0]
   }
 
   static saveDetails(id: string, context: SourceCitation[], progress: number): void {

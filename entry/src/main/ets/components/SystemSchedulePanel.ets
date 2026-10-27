@@ -1,5 +1,6 @@
 import { common } from '@kit.AbilityKit'
 import { UiTheme } from '../config/UiTheme'
+import { UiMotion } from '../config/UiMotion'
 import { ScheduleArgs, ScheduleEntry, ScheduleResult } from '../models/ScheduleModels'
 import { IntegrationService } from '../services/IntegrationService'
 import { ScheduleService } from '../services/ScheduleService'
@@ -83,7 +84,7 @@ export struct SystemSchedulePanel {
     const listing = name === 'query_calendar_events' || name === 'list_system_reminders' || (name === 'manage_memo' && args.action === 'list')
     if (listing) this.entries = result.entries || []
     else if (result.ok && result.status !== 'share_opened') {
-      this.editing = false
+      this.setEditing(false)
       const refreshed = await ScheduleOverviewService.list(this.tab, platform, active)
       if (!active()) return
       this.entries = refreshed.entries || result.entries || []
@@ -104,7 +105,13 @@ export struct SystemSchedulePanel {
     this.title = entry?.title || ''; this.content = entry?.content || ''
     if (entry?.start) this.start = ScheduleService.localLabel(Date.parse(entry.start))
     if (entry?.end) this.end = ScheduleService.localLabel(Date.parse(entry.end))
-    this.editing = true
+    this.setEditing(true)
+  }
+  private setEditing(value: boolean): void {
+    this.getUIContext().animateTo({ duration: UiMotion.section, curve: Curve.EaseOut }, () => this.editing = value)
+  }
+  private setReminderKind(value: string): void {
+    this.getUIContext().animateTo({ duration: UiMotion.section, curve: Curve.EaseOut }, () => this.reminderKind = value)
   }
 
   private async readMemo(entry: ScheduleEntry): Promise<void> {
@@ -140,12 +147,26 @@ export struct SystemSchedulePanel {
     } catch (error) { this.notice = (error as Error).message }
   }
 
+  @Styles
+  interactive() {
+    .hoverEffect(HoverEffect.Highlight)
+    .stateStyles({ normal: { .opacity(1).scale({ x: 1, y: 1 }) }, pressed: { .opacity(0.78).scale({ x: 0.98, y: 0.98 }) } })
+    .animation({ duration: UiMotion.press, curve: Curve.EaseOut })
+  }
+
+  @Styles
+  focusFeedback() {
+    .border({ width: 1, color: Color.Transparent })
+    .stateStyles({ normal: { .borderColor(Color.Transparent) }, focused: { .borderColor(UiTheme.focus) } })
+    .animation({ duration: UiMotion.press, curve: Curve.EaseOut })
+  }
+
   @Builder
   Field(label: string, value: string, id: string, update: (value: string) => void) {
     Text(label).fontSize(11 * this.fontScale).fontColor(UiTheme.secondary).width('100%')
     TextInput({ text: value, placeholder: label }).fontSize(13 * this.fontScale).placeholderFont({ size: 13 * this.fontScale })
       .width('100%').height(34 * this.fontScale).padding({ left: 10, right: 10, top: 0, bottom: 0 })
-      .backgroundColor(UiTheme.raised).borderRadius(6).id(id).onChange(update)
+      .backgroundColor(UiTheme.raised).borderRadius(6).id(id).focusFeedback().onChange(update)
   }
 
   build() {
@@ -153,26 +174,29 @@ export struct SystemSchedulePanel {
       if (!this.embedded) { Row() {
         Text('日程与提醒').fontSize(20 * this.fontScale).fontWeight(FontWeight.Medium).fontColor(UiTheme.text).layoutWeight(1)
         Button('关闭').fontSize(12 * this.fontScale).height(32 * this.fontScale).fontColor(UiTheme.text).backgroundColor(UiTheme.raised)
-          .id('system-schedule-close').onClick(() => this.onClose())
+          .id('system-schedule-close').interactive().onClick(() => this.onClose())
       }.width('100%') }
       Text(this.currentTime).fontSize(11 * this.fontScale).fontColor(UiTheme.secondary).width('100%').id('system-current-time')
-        .onClick(() => this.refreshTime())
+        .interactive().onClick(() => this.refreshTime())
       Row({ space: 8 * this.fontScale }) {
         if (!this.embedded) {
         Button('日历').fontSize(12 * this.fontScale).height(32 * this.fontScale).backgroundColor(this.tab === 'calendar' ? UiTheme.primary : UiTheme.raised)
-          .fontColor(this.tab === 'calendar' ? UiTheme.surface : UiTheme.text).id('system-tab-calendar').enabled(!this.busy).onClick(() => this.switchTab('calendar'))
+          .fontColor(this.tab === 'calendar' ? UiTheme.surface : UiTheme.text).id('system-tab-calendar').enabled(!this.busy).interactive().onClick(() => this.switchTab('calendar'))
         Button('提醒').fontSize(12 * this.fontScale).height(32 * this.fontScale).backgroundColor(this.tab === 'reminders' ? UiTheme.primary : UiTheme.raised)
-          .fontColor(this.tab === 'reminders' ? UiTheme.surface : UiTheme.text).id('system-tab-reminders').enabled(!this.busy).onClick(() => this.switchTab('reminders'))
+          .fontColor(this.tab === 'reminders' ? UiTheme.surface : UiTheme.text).id('system-tab-reminders').enabled(!this.busy).interactive().onClick(() => this.switchTab('reminders'))
         Button('备忘录').fontSize(12 * this.fontScale).height(32 * this.fontScale).backgroundColor(this.tab === 'memos' ? UiTheme.primary : UiTheme.raised)
-          .fontColor(this.tab === 'memos' ? UiTheme.surface : UiTheme.text).id('system-tab-memos').enabled(!this.busy).onClick(() => this.switchTab('memos'))
+          .fontColor(this.tab === 'memos' ? UiTheme.surface : UiTheme.text).id('system-tab-memos').enabled(!this.busy).interactive().onClick(() => this.switchTab('memos'))
         }
         Blank()
         Button(this.busy ? '处理中' : '刷新').fontSize(12 * this.fontScale).height(32 * this.fontScale).backgroundColor(UiTheme.raised).fontColor(UiTheme.text)
-          .id('system-schedule-refresh').enabled(!this.busy).onClick(() => { this.refreshTime(); this.refreshEntries() })
+          .id('system-schedule-refresh').enabled(!this.busy).interactive().onClick(() => { this.refreshTime(); this.refreshEntries() })
         Button('新建').fontSize(12 * this.fontScale).height(32 * this.fontScale).backgroundColor(UiTheme.raised).fontColor(UiTheme.text)
-          .id('system-schedule-new').enabled(!this.busy).onClick(() => this.edit())
+          .id('system-schedule-new').enabled(!this.busy).interactive().onClick(() => this.edit())
       }.width('100%')
-      Text(this.notice).fontSize(12 * this.fontScale).lineHeight(18 * this.fontScale).fontColor(UiTheme.secondary).width('100%').id('system-schedule-notice')
+      Row({ space: 8 * this.fontScale }) {
+        if (this.busy) { LoadingProgress().width(16 * this.fontScale).height(16 * this.fontScale).color(UiTheme.secondary).transition(UiMotion.fade()) }
+        Text(this.notice).fontSize(12 * this.fontScale).lineHeight(18 * this.fontScale).fontColor(UiTheme.secondary).layoutWeight(1).id('system-schedule-notice')
+      }.width('100%')
       Scroll() {
         Column({ space: 10 * this.fontScale }) {
           if (this.editing) {
@@ -185,11 +209,11 @@ export struct SystemSchedulePanel {
               if (this.tab === 'reminders' && !this.calendarForm()) {
                 Row({ space: 8 }) {
                   Button(this.reminderKind === 'alarm' ? '✓ 闹钟' : '闹钟').fontSize(11 * this.fontScale).height(30 * this.fontScale)
-                    .backgroundColor(UiTheme.surface).fontColor(UiTheme.text).onClick(() => this.reminderKind = 'alarm')
+                    .backgroundColor(UiTheme.surface).fontColor(UiTheme.text).interactive().onClick(() => this.setReminderKind('alarm'))
                   Button(this.reminderKind === 'timer' ? '✓ 倒计时' : '倒计时').fontSize(11 * this.fontScale).height(30 * this.fontScale)
-                    .backgroundColor(UiTheme.surface).fontColor(UiTheme.text).onClick(() => this.reminderKind = 'timer')
+                    .backgroundColor(UiTheme.surface).fontColor(UiTheme.text).interactive().onClick(() => this.setReminderKind('timer'))
                   Button(this.reminderKind === 'calendar' ? '✓ 日期提醒' : '日期提醒').fontSize(11 * this.fontScale).height(30 * this.fontScale)
-                    .backgroundColor(UiTheme.surface).fontColor(UiTheme.text).onClick(() => this.reminderKind = 'calendar')
+                    .backgroundColor(UiTheme.surface).fontColor(UiTheme.text).interactive().onClick(() => this.setReminderKind('calendar'))
                 }
                 if (this.reminderKind === 'alarm') this.Field('下次响铃时刻（设备时间 HH:mm）', this.alarmTime, 'system-alarm-time', (value: string) => this.alarmTime = value)
                 else if (this.reminderKind === 'timer') this.Field('倒计时秒数', this.seconds, 'system-timer-seconds', (value: string) => this.seconds = value)
@@ -197,15 +221,16 @@ export struct SystemSchedulePanel {
               if (!this.calendarForm() || this.selectedEvent < 0) {
                 TextArea({ text: this.content, placeholder: this.tab === 'memos' ? '备忘录正文' : '说明（选填）' }).fontSize(13 * this.fontScale)
                   .placeholderFont({ size: 13 * this.fontScale }).width('100%').height(72 * this.fontScale).maxLength(8000)
-                  .backgroundColor(UiTheme.surface).id('system-entry-content').onChange((value: string) => this.content = value)
+                  .backgroundColor(UiTheme.surface).id('system-entry-content').focusFeedback().onChange((value: string) => this.content = value)
               }
               if (this.tab === 'calendar' && this.selectedEvent < 0) { Text('新日程默认提前10分钟提醒。').fontSize(11 * this.fontScale).fontColor(UiTheme.secondary) }
               Row({ space: 10 }) {
-                Button('收起').height(30 * this.fontScale).fontSize(12 * this.fontScale).backgroundColor(UiTheme.surface).fontColor(UiTheme.text).enabled(!this.busy).onClick(() => this.editing = false)
+                Button('收起').height(30 * this.fontScale).fontSize(12 * this.fontScale).backgroundColor(UiTheme.surface).fontColor(UiTheme.text).enabled(!this.busy).interactive().onClick(() => this.setEditing(false))
                 Button('核对并保存').height(30 * this.fontScale).fontSize(12 * this.fontScale).backgroundColor(UiTheme.primary).fontColor(UiTheme.surface)
-                  .id('system-entry-save').enabled(!this.busy && this.title.trim().length > 0).onClick(() => this.save())
+                  .id('system-entry-save').enabled(!this.busy && this.title.trim().length > 0).interactive().onClick(() => this.save())
               }
             }.padding(12 * this.fontScale).width('100%').backgroundColor(UiTheme.raised).borderRadius(8).enabled(!this.busy)
+              .transition(UiMotion.reveal()).id('system-schedule-editor')
           }
           ForEach(this.entries, (entry: ScheduleEntry) => {
             Column({ space: 7 * this.fontScale }) {
@@ -214,24 +239,25 @@ export struct SystemSchedulePanel {
               Row({ space: 8 }) {
                 if (entry.kind !== 'reminder') {
                   Button('修改').height(28 * this.fontScale).fontSize(11 * this.fontScale).backgroundColor(UiTheme.raised).fontColor(UiTheme.text)
-                    .id(`system-edit-${entry.id}`).onClick(() => this.edit(entry))
+                    .id(`system-edit-${entry.id}`).interactive().onClick(() => this.edit(entry))
                 }
                 if (entry.kind === 'memo') {
                   Button('系统分享').height(28 * this.fontScale).fontSize(11 * this.fontScale).backgroundColor(UiTheme.raised).fontColor(UiTheme.text)
-                    .id(`system-share-${entry.id}`).onClick(() => this.run('manage_memo', { action: 'share', id: entry.id }))
+                    .id(`system-share-${entry.id}`).interactive().onClick(() => this.run('manage_memo', { action: 'share', id: entry.id }))
                 }
                 Button(entry.kind === 'reminder' ? '取消提醒' : '删除').height(28 * this.fontScale).fontSize(11 * this.fontScale).backgroundColor(UiTheme.raised).fontColor(UiTheme.text)
-                  .id(`system-delete-${entry.id}`).onClick(() => {
+                  .id(`system-delete-${entry.id}`).interactive().onClick(() => {
                     if (entry.kind === 'memo') this.run('manage_memo', { action: 'delete', id: entry.id })
                     else if (entry.kind === 'reminder') this.run('cancel_system_reminder', { reminderId: entry.reminderId })
                     else this.run('delete_calendar_event', { calendarId: entry.calendarId, eventId: entry.eventId })
                   })
               }.enabled(!this.busy)
             }.width('100%').padding(12 * this.fontScale).border({ width: 1, color: UiTheme.border }).borderRadius(8).id(`system-result-${entry.id}`)
+              .transition(UiMotion.reveal())
           }, (entry: ScheduleEntry) => `${entry.id}-${entry.detail}`)
           if (!this.busy && !this.editing && this.entries.length === 0) {
             Text(this.tab === 'calendar' ? '当前范围没有可显示的日程。' : this.tab === 'memos' ? '暂无备忘录。' : '暂无可显示的提醒；设置失败的闹钟不会列为已生效。')
-              .fontSize(12 * this.fontScale).fontColor(UiTheme.muted).padding(16 * this.fontScale).width('100%').id('system-schedule-empty')
+              .fontSize(12 * this.fontScale).fontColor(UiTheme.muted).padding(16 * this.fontScale).width('100%').id('system-schedule-empty').transition(UiMotion.fade())
           }
         }.width('100%').alignItems(HorizontalAlign.Start)
       }.layoutWeight(1).width('100%').align(Alignment.TopStart).scrollBar(BarState.Auto)

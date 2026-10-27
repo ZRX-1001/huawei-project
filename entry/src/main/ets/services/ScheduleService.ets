@@ -105,11 +105,11 @@ export class ScheduleService {
     confirm: (title: string, detail: string) => Promise<boolean>): Promise<ScheduleResult> {
     try {
       const args = ScheduleService.validate(call.name, call.arguments)
-      if (!active()) return { ok: false, message: '操作已取消。' }
+      if (!active()) return { ok: false, status: 'cancelled', message: '操作已取消。' }
       return await platform.perform(call.name, args, active, confirm)
     } catch (error) {
       const code = (error as ScheduleError).code
-      return { ok: false, message: code === undefined ? (error as Error).message || '系统操作失败。'
+      return { ok: false, status: !active() ? 'cancelled' : undefined, message: code === undefined ? (error as Error).message || '系统操作失败。'
         : `系统操作失败（${code}）。请检查日历/通知授权或设备是否支持该能力；没有完成本次操作。` }
     }
   }

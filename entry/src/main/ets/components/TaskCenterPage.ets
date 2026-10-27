@@ -1,4 +1,5 @@
 import { UiTheme } from '../config/UiTheme'
+import { UiMotion } from '../config/UiMotion'
 import { AgentTaskPage } from './AgentTaskPage'
 import { SystemSchedulePanel } from './SystemSchedulePanel'
 
@@ -12,6 +13,9 @@ export struct TaskCenterPage {
   Tab(label: string, id: string) {
     Button(label).fontSize(13 * this.fontScale).height(34 * this.fontScale).borderRadius(8 * this.fontScale)
       .backgroundColor(this.tab === id ? UiTheme.primary : UiTheme.raised).fontColor(this.tab === id ? UiTheme.surface : UiTheme.text)
+      .hoverEffect(HoverEffect.Highlight)
+      .stateStyles({ normal: { .opacity(1).scale({ x: 1, y: 1 }) }, pressed: { .opacity(0.78).scale({ x: 0.98, y: 0.98 }) } })
+      .animation({ duration: UiMotion.press, curve: Curve.EaseOut })
       .id(`task-center-${id}`).onClick(() => this.tab = id)
   }
   build() {
@@ -23,10 +27,13 @@ export struct TaskCenterPage {
           : this.tab === 'reminders' ? '同时显示本应用代理提醒与日历提醒，打开页面自动读取。' : this.tab === 'calendar' ? '显示系统授权范围内的日程，包含对话中创建的日历提醒。' : '本机保存的备忘录，可编辑并通过系统分享。')
           .fontSize(11 * this.fontScale).fontColor(UiTheme.secondary).width('100%')
       }.width('100%').padding(22 * this.fontScale).border({ width: { bottom: 1 }, color: UiTheme.border })
-      if (this.tab === 'agent') { AgentTaskPage().layoutWeight(1) }
-      else {
-        ForEach([this.tab], (tab: string) => { SystemSchedulePanel({ embedded: true, initialTab: tab }).layoutWeight(1) }, (tab: string) => tab)
-      }
+      Stack({ alignContent: Alignment.TopStart }) {
+        if (this.tab === 'agent') { AgentTaskPage().width('100%').height('100%').transition(UiMotion.page()) }
+        else {
+          ForEach([this.tab], (tab: string) => { SystemSchedulePanel({ embedded: true, initialTab: tab })
+            .width('100%').height('100%').transition(UiMotion.page()) }, (tab: string) => tab)
+        }
+      }.layoutWeight(1).width('100%').clip(true)
     }.width('100%').height('100%').backgroundColor(UiTheme.background).id('task-center-page')
   }
 }

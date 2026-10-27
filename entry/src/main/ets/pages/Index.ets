@@ -1,4 +1,5 @@
 import { UiTheme } from '../config/UiTheme'
+import { UiMotion } from '../config/UiMotion'
 import { FEATURE_CATALOG } from '../config/FeatureCatalog'
 import { AgentMessage, FeatureDefinition } from '../models/AppModels'
 import { SessionService, ChatSession, SessionSummary } from '../services/SessionService'
@@ -28,6 +29,9 @@ import { ScheduleService } from '../services/ScheduleService'
 import { TaskCenterPage } from '../components/TaskCenterPage'
 import { LibraryPage } from '../components/LibraryPage'
 import { AgentTaskManager } from '../services/AgentTaskManager'
+import { util } from '@kit.ArkTS'
+import { ExecutionRecord } from '../models/ExecutionModels'
+import { ExecutionTraceService } from '../services/ExecutionTraceService'
 
 class ChatStreamSink implements StreamSink {
   private cancelled: () => boolean
@@ -440,13 +444,31 @@ struct Index {
   }
 
   private updateReply(position: number, content: string, meta: string, status: string, sources: SourceCitation[], phase: string = ''): void {
-    this.messages = this.messages.map((item: AgentMessage, index: number): AgentMessage => index === position
-      ? { role: 'agent', content: content, meta: meta, status: status, sources: sources,
-        renderRevision: (item.renderRevision || 0) + 1, thinkingStartedAt: item.thinkingStartedAt,
-        thinkingDurationMs: status === 'complete' || status === 'error' || status === 'stopped'
-          ? (item.thinkingStartedAt === undefined ? undefined : Date.now() - item.thinkingStartedAt) : item.thinkingDurationMs,
-        phase: phase || (status === 'streaming' ? 'answering' : item.phase) } : item)
+    this.messages = this.messages.map((item: AgentMessage, index: number): AgentMessage => {
+      if (index !== position) return item
+      const next = ExecutionTraceService.settle(item, status)
+      next.role = 'agent'; next.content = content; next.meta = meta; next.sources = sources
+      next.renderRevision = (item.renderRevision || 0) + 1
+      next.phase = phase || (status === 'streaming' ? 'answering' : item.phase)
+      return next
+    })
     SessionService.saveMessages(this.activeSession, this.messages, false)
+  }
+
+  private recordExecution(sessionId: string, executionId: string, record: ExecutionRecord): void {
+    const saved = SessionService.recordExecution(sessionId, executionId, record)
+    if (!saved || sessionId !== this.activeSession) return
+    try { this.getUIContext().runScopedTask(() => {
+      if (sessionId !== this.activeSession) return
+      this.messages = this.messages.map((item: AgentMessage): AgentMessage => {
+        if (item.executionId !== executionId) return item
+        const next = JSON.parse(JSON.stringify(item)) as AgentMessage
+        next.executions = saved.executions; next.thinkingLastActiveAt = saved.thinkingLastActiveAt
+        next.renderRevision = (item.renderRevision || 0) + 1
+        return next
+      })
+      this.storageNotice = SessionService.storageNotice
+    }) } catch (_error) { /* The persisted receipt remains valid after its view is destroyed. */ }
   }
 
   private toggleThought(position: number): void {
@@ -596,7 +618,7 @@ struct Index {
   }
 
   private async executeWorkspaceTool(call: AgentToolCall, token: number, sessionId: string): Promise<string> {
-    if (token !== this.requestSerial || sessionId !== this.activeSession) return JSON.stringify({ ok: false, message: '会话已切换或生成已停止。' })
+    if (token !== this.requestSerial || sessionId !== this.activeSession) return JSON.stringify({ ok: false, status: 'cancelled', message: '会话已切换或生成已停止。' })
     const uiContext = this.getUIContext()
     try {
       if (call.name === 'manage_agent_task') {
@@ -632,7 +654,7 @@ struct Index {
         const adapter = result.featureId === 'forms' ? IntegrationService.forms : result.featureId === 'study'
           ? IntegrationService.study : IntegrationService.hardware
         const moduleResult = await adapter.execute(result.action, result.input || '')
-        if (token !== this.requestSerial || sessionId !== this.activeSession) return JSON.stringify({ ok: false, message: '操作结果已过期，不再更新当前会话。' })
+        if (token !== this.requestSerial || sessionId !== this.activeSession) return JSON.stringify({ ok: false, status: 'cancelled', message: '操作结果已过期，不再更新当前会话。' })
         uiContext.runScopedTask(() => { this.moduleNotice = moduleResult.message; this.moduleItems = moduleResult.ok ? moduleResult.items : [] })
         if (!moduleResult.ok) return JSON.stringify({ ok: false, message: moduleResult.message })
         const id = `module-${result.featureId}-${result.action}`
@@ -642,7 +664,7 @@ struct Index {
         result.state = WorkspaceService.update(result.state, { summary: moduleResult.message.slice(0, 3000), artifacts: artifacts })
         result.message = moduleResult.message
       }
-      if (token !== this.requestSerial || sessionId !== this.activeSession) return JSON.stringify({ ok: false, message: '生成已停止。' })
+      if (token !== this.requestSerial || sessionId !== this.activeSession) return JSON.stringify({ ok: false, status: 'cancelled', message: '生成已停止。' })
       if (call.name !== 'read_workspace') {
         uiContext.runScopedTask(() => {
           this.activeFeature = result.featureId
@@ -918,10 +940,16 @@ struct Index {
     this.activeGateway = gateway
     const attachedContext = this.selectedContext.slice()
     const attachments = reviewContext ? [] : this.draftAttachments.slice()
+    const executionId = util.generateRandomUUID()
+    const startedAt = Date.now()
+    const secrets = [IntegrationService.agentSettings.apiKey, IntegrationService.agentSettings.baseUrl]
+    const retrievalRecord: ExecutionRecord = { id: 'retrieval', kind: 'retrieval', name: 'local_retrieval', title: '检索与引用资料',
+      status: 'running', startedAt: startedAt, input: '', detail: '正在查找本地资料及已选上下文。', targets: [] }
     if (!reviewContext) this.draftAttachments = []
     this.messages = [...this.messages, { role: 'user', content: message, meta: '现在', attachments: attachments }]
     this.messages = [...this.messages, { role: 'agent', content: '', meta: '正在检索资料', status: 'loading',
-      sources: [], thinkingStartedAt: Date.now(), phase: 'retrieving' }]
+      sources: [], thinkingStartedAt: startedAt, thinkingLastActiveAt: startedAt, phase: 'retrieving', executionId: executionId,
+      executions: attachments.length > 0 ? [retrievalRecord, ExecutionTraceService.attachments(attachments, secrets)] : [retrievalRecord] }]
     const replyIndex = this.messages.length - 1
     if (!reviewContext) this.inputText = ''
     this.notice = ''
@@ -936,6 +964,7 @@ struct Index {
     let content = ''
     let sources: SourceCitation[] = []
     let waitingForSystem = false
+    let toolOrdinal = 0
     let responseDeadline = Date.now() + ApiConfig.requestTimeoutMs + 3000
     const timeout = setInterval(() => {
       if (token !== this.requestSerial) { clearInterval(timeout); return }
@@ -964,7 +993,7 @@ struct Index {
     }, (phase: string): void => {
       uiContext.runScopedTask(() => {
         if (token !== this.requestSerial) return
-        this.updateReply(replyIndex, content, `${gateway.name} · 正在分析`, 'loading', sources, phase)
+        this.updateReply(replyIndex, content, `${gateway.name} · 正在分析`, content.trim() ? 'streaming' : 'loading', sources, phase)
       })
     })
     ChatService.reply(message, featureId, history, this.retrievalOptions(), IntegrationService.rag(), gateway, sink,
@@ -974,10 +1003,21 @@ struct Index {
           sources = result.sources
           this.notice = result.notice
           this.updateReply(replyIndex, '', `${gateway.name} · ${sources.length} 条参考资料`, 'loading', sources, 'connecting')
+          this.recordExecution(sessionId, executionId, ExecutionTraceService.retrieval('retrieval', startedAt, sources, secrets))
         })
       }, attachedContext, attachments, workspace, (call: AgentToolCall): Promise<string> => {
         waitingForSystem = ScheduleService.handles(call.name) || call.name === 'manage_agent_task'
-        return this.executeWorkspaceTool(call, token, sessionId).finally(() => {
+        const record = ExecutionTraceService.tool(`tool-${++toolOrdinal}`, call, secrets)
+        const before = WorkspaceService.copy(this.workspace).artifacts
+        this.recordExecution(sessionId, executionId, record)
+        return this.executeWorkspaceTool(call, token, sessionId).then((output: string): string => {
+          this.recordExecution(sessionId, executionId, ExecutionTraceService.finish(record, call, output, before, secrets))
+          return output
+        }).catch((error: Error): string => {
+          const output = JSON.stringify({ ok: false, message: error.message || '工具操作失败。' })
+          this.recordExecution(sessionId, executionId, ExecutionTraceService.finish(record, call, output, before, secrets))
+          return output
+        }).finally(() => {
           if (waitingForSystem) responseDeadline = Date.now() + ApiConfig.requestTimeoutMs + 3000
           waitingForSystem = false
         })
@@ -1773,8 +1813,6 @@ struct Index {
     }.width('100%').padding(14 * this.fontScale).alignItems(HorizontalAlign.Start)
     }.id('task-panel').width(this.panelWidth('right')).height('100%').backgroundColor(UiTheme.background).align(Alignment.TopStart).scrollBar(BarState.Auto)
       .transition(TransitionEffect.OPACITY.animation({ duration: 180 }))
-      .bindSheet($$this.artifactVisible, this.ArtifactSheet(), { height: '80%', width: 680,
-        preferType: SheetType.CENTER, showClose: false, dragBar: false })
   }
 
   private navigateSection(section: string): void {
@@ -1844,11 +1882,14 @@ struct Index {
   build() {
     Row() {
       this.GlobalRail()
+      Stack({ alignContent: Alignment.TopStart }) {
       if (this.appSection === 'tasks') {
-        TaskCenterPage({ initialTab: this.taskCenterTab }).layoutWeight(1)
+        TaskCenterPage({ initialTab: this.taskCenterTab }).width('100%').height('100%').transition(UiMotion.page())
       } else if (this.appSection === 'library') {
-        LibraryPage({ onUse: (id: string, attachment: boolean) => this.useLibraryDocument(id, attachment), onChanged: () => this.refreshKnowledge() }).layoutWeight(1)
+        LibraryPage({ onUse: (id: string, attachment: boolean) => this.useLibraryDocument(id, attachment), onChanged: () => this.refreshKnowledge() })
+          .width('100%').height('100%').transition(UiMotion.page())
       } else {
+      Row() {
       if (this.isLeftPanelVisible) { this.SidebarContent() }
       if (this.isLeftPanelVisible) { this.ResizeHandle('left') }
 
@@ -1906,7 +1947,12 @@ struct Index {
                     AgentAnswer({ message: message, expanded: this.expandedThoughts.includes(`${this.activeSession}-${index}`),
                       documentId: `message-${index}`, sessionId: this.activeSession,
                       editable: !this.thinking && this.activeFeature !== 'trash', feedback: this.feedbackFor(`message-${index}`),
-                      onInteraction: (change: InteractionChange) => this.changeMessageInteraction(index, change), onToggle: () => this.toggleThought(index) })
+                      onInteraction: (change: InteractionChange) => this.changeMessageInteraction(index, change), onToggle: () => this.toggleThought(index),
+                      onOpenArtifact: (id: string): void => {
+                        const artifact = this.workspace.artifacts.find((item: WorkspaceArtifact) => item.id === id)
+                        if (artifact) this.showArtifact(artifact)
+                        else this.getUIContext().getPromptAction().showToast({ message: '该产物已被后续内容移除或替换，执行记录仍然保留。' })
+                      } })
                   } else {
                     Text(message.content).fontSize(15 * this.fontScale).fontColor(UiTheme.text).lineHeight(23 * this.fontScale).copyOption(CopyOptions.InApp)
                   }
@@ -2001,7 +2047,11 @@ struct Index {
           onDisappear: () => { this.apiSettingsVisible = false } })
 
       if (this.isTaskPanelVisible && !this.isWelcomePage && this.activeFeature !== 'trash') { this.ResizeHandle('right'); this.TaskPanel() }
+      }.width('100%').height('100%').transition(UiMotion.page())
       }
+      }.layoutWeight(1).height('100%').clip(true)
+        .bindSheet($$this.artifactVisible, this.ArtifactSheet(), { height: '80%', width: 680,
+          preferType: SheetType.CENTER, showClose: false, dragBar: false })
     }.width('100%').height('100%').backgroundColor(UiTheme.background)
       .onAreaChange((_oldArea: Area, newArea: Area) => { this.viewportWidth = Number.parseFloat(`${newArea.width}`) || 1280 })
       .bindSheet($$this.contextPickerVisible, this.ContextSheet(), { height: '80%', width: 680,

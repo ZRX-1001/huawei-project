@@ -1,5 +1,6 @@
 import { SourceCitation } from './RagModels'
 import { ChatAttachment } from './AttachmentModels'
+import { ExecutionRecord } from './ExecutionModels'
 
 export interface AgentMessage {
   role: string
@@ -12,6 +13,9 @@ export interface AgentMessage {
   thinkingDurationMs?: number
   phase?: string
   attachments?: ChatAttachment[]
+  executionId?: string
+  executions?: ExecutionRecord[]
+  thinkingLastActiveAt?: number
 }
 
 export interface FeatureDefinition {

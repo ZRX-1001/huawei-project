@@ -12,6 +12,7 @@ const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.Modu
   target: ts.ScriptTarget.ES2020 } }).outputText;
 const catalogExports = {};
 vm.runInNewContext(ts.transpileModule(fs.readFileSync(path.join(__dirname, '../entry/src/main/ets/config/FeatureCatalog.ets'), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText, { exports: catalogExports });
+const traceSource = ts.transpileModule(fs.readFileSync(path.join(__dirname, '../entry/src/main/ets/services/ExecutionTraceService.ets'), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText;
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'campuspilot-history-'));
 const archivePath = path.join(directory, 'chat_sessions.json');
 let failRename = false;
@@ -28,8 +29,11 @@ const bridge = {
 };
 function boot() {
   const exports = {};
+  const traceExports = {};
+  vm.runInNewContext(traceSource, { exports: traceExports, Date: TestDate });
   vm.runInNewContext(compiled, { exports, setTimeout, clearTimeout, Date: TestDate,
     require: name => {
+      if (name === './ExecutionTraceService') return traceExports;
       if (name === '../config/FeatureCatalog') return catalogExports;
       if (name === '@kit.CoreFileKit') return { fileIo: bridge };
       if (name === '@kit.ArkTS') return { util: { generateRandomUUID: crypto.randomUUID } };
@@ -211,6 +215,32 @@ try {
   assert.equal(service.sidebar().rightWidth, 350);
   assert.equal(service.sidebar().fontScale, 1.1);
   assert.equal(service.sidebar().taskPanelVisible, false);
+  const traceSession = service.create('home', 'execution fixture', []);
+  const traceOther = service.create('home', 'another reply', []);
+  const traceStart = now;
+  service.saveMessages(traceSession.id, [{role:'agent',content:'partial',meta:'',status:'streaming',thinkingStartedAt:traceStart,
+    thinkingLastActiveAt:traceStart,executionId:'execution-a'}]);
+  const traceOrder = service.get(traceSession.id).updatedAt;
+  const traceRecord = {id:'tool-1',kind:'tool',name:'get_system_time',title:'读取时间',status:'running',startedAt:traceStart,input:'',detail:'waiting',targets:[]};
+  now += 2700;
+  service.activate(traceOther.id);
+  service.recordExecution(traceSession.id,'execution-a',traceRecord);
+  assert.equal(service.get(traceSession.id).updatedAt,traceOrder,'tool metadata does not reorder conversations');
+  assert.equal(service.current().id,traceOther.id,'execution receipts cannot activate their old conversation');
+  service = boot();
+  const interrupted = service.get(traceSession.id).messages[0];
+  assert.equal(interrupted.thinkingDurationMs,2700);
+  assert.equal(interrupted.executions[0].status,'interrupted');
+  now += 40000;
+  service.recordExecution(traceSession.id,'execution-a',{...traceRecord,status:'success',finishedAt:traceStart+2700,detail:'real receipt'});
+  assert.equal(service.get(traceSession.id).messages[0].executions.length,1);
+  assert.equal(service.get(traceSession.id).messages[0].executions[0].status,'success');
+  assert.equal(service.get(traceSession.id).messages[0].thinkingDurationMs,2700);
+  service = boot();
+  assert.equal(service.get(traceSession.id).messages[0].thinkingDurationMs,2700,'reopening and later receipts never restart elapsed time');
+  assert.equal(service.get(traceSession.id).messages[0].executions[0].detail,'real receipt');
+  service.trash(traceSession.id); service.remove(traceSession.id);
+  assert.equal(service.recordExecution(traceSession.id,'execution-a',traceRecord),undefined,'late results cannot resurrect deleted messages');
   fs.writeFileSync(archivePath, '{broken');
   fs.writeFileSync(`${archivePath}.bak`, '{also broken');
   service = boot();

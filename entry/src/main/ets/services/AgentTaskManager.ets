@@ -59,7 +59,7 @@ export class AgentTaskManager {
         : `${draft.title}\n${draft.prompt}\n周期：${AgentTaskService.describe(draft)}\n首次：${ScheduleService.localLabel(['daily', 'weekly'].includes(draft.mode) ? AgentTaskService.next(draft, draft.firstRunAt - 1) : draft.firstRunAt)}\n后台由系统择机执行，可能延迟。`
       const title = args.action === 'create' ? '创建Agent定时任务' : args.action === 'update' ? '修改Agent定时任务'
         : args.action === 'delete' ? '删除Agent定时任务' : args.action === 'pause' ? '暂停Agent定时任务' : '启用Agent定时任务'
-      if (!await confirm(title, detail) || !active()) return JSON.stringify({ ok: false, message: '本次操作已取消，没有更改任务。' })
+      if (!await confirm(title, detail) || !active()) return JSON.stringify({ ok: false, status: 'cancelled', message: '本次操作已取消，没有更改任务。' })
       if (draft !== undefined) store.save(draft, args.action === 'update' ? args.id : undefined)
       else if (args.action === 'delete') { AgentTaskRuntime.cancel(args.id); store.remove(args.id!) }
       else {
