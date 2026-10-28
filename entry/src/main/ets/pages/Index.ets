@@ -9,7 +9,7 @@ import { RagConfig } from '../config/RagConfig'
 import { demoKnowledgeIndex, MemoryKnowledgeRepository } from '../services/KnowledgeService'
 import { ChatService } from '../services/ChatService'
 import { AgentGateway, StreamSink, ModuleAdapter, ModuleItem, ModuleResult, VoiceObserver } from '../models/IntegrationModels'
-import { ApiConfig } from '../config/ApiConfig'
+import { ApiConfig, AgentProfileArchive, AgentProfileSummary } from '../config/ApiConfig'
 import { common } from '@kit.AbilityKit'
 import { LocalAgentConfigService } from '../services/LocalAgentConfigService'
 import { AgentAnswer } from '../components/AgentAnswer'
@@ -34,6 +34,9 @@ import { ExecutionRecord } from '../models/ExecutionModels'
 import { ExecutionTraceService } from '../services/ExecutionTraceService'
 import { MessageTimeService } from '../services/MessageTimeService'
 import { ReplyActions } from '../components/ReplyActions'
+import { ApiProfilesSheet } from '../components/ApiProfilesSheet'
+import { ModelSelector } from '../components/ModelSelector'
+import { ChatSendButton } from '../components/ChatSendButton'
 
 // Drive native layout each frame instead of stretching the final text layout.
 @AnimatableExtend(Row)
@@ -85,6 +88,7 @@ struct Index {
   @State leftWidth: number = 256
   @State rightWidth: number = 274
   @State viewportWidth: number = 1280
+  @State viewportHeight: number = 800
   @State resizingPanel: string = ''
   @State hoveredGrip: string = ''
   private dragStartWidth: number = 0
@@ -141,11 +145,12 @@ struct Index {
   @State moduleItems: ModuleItem[] = []
   @State moduleInput: string = ''
   @State apiSettingsVisible: boolean = false
-  @State apiBaseUrl: string = ''
-  @State apiModel: string = ''
-  @State apiKey: string = ''
   @State apiConfigured: boolean = false
-  @State apiNotice: string = ''
+  @State apiProfiles: AgentProfileSummary[] = []
+  @State apiActiveId: string = ''
+  @State apiActiveModel: string = ''
+  @State apiProfilesLoading: boolean = true
+  private apiLoadSerial: number = 0
   private requestSerial: number = 0
   private searchSerial: number = 0
   private voiceSerial: number = 0
@@ -194,26 +199,21 @@ struct Index {
     this.leftWidth = sidebar.leftWidth || 256
     this.rightWidth = sidebar.rightWidth || 274
     this.chooseFeature(FEATURE_CATALOG[0])
-    this.apiBaseUrl = IntegrationService.agentSettings.baseUrl
-    this.apiModel = IntegrationService.agentSettings.model
-    this.apiKey = IntegrationService.agentSettings.apiKey
-    this.apiConfigured = this.apiBaseUrl.length > 0 && this.apiModel.length > 0
     this.loadLocalAgentConfig()
   }
 
   private async loadLocalAgentConfig(): Promise<void> {
-    if (IntegrationService.agentSettings.baseUrl.length > 0) return
-    const settings = await LocalAgentConfigService.load(this.getUIContext().getHostContext() as common.UIAbilityContext)
-    if (settings === undefined || !settings.baseUrl || !settings.model || IntegrationService.agentSettings.baseUrl.length > 0) return
-    IntegrationService.configureAgent(settings)
-    this.apiBaseUrl = settings.baseUrl
-    this.apiModel = settings.model
-    this.apiKey = settings.apiKey
-    this.apiConfigured = true
-    this.apiNotice = '已从本地配置文件加载模型设置。'
+    const token = ++this.apiLoadSerial
+    this.apiProfilesLoading = true
+    try {
+      const archive = await LocalAgentConfigService.loadProfiles(this.getUIContext().getHostContext() as common.UIAbilityContext)
+      if (token === this.apiLoadSerial) this.applyApiProfiles(archive)
+    } catch (error) { if (token === this.apiLoadSerial) this.notice = (error as Error).message || '模型配置读取失败，请重新打开配置窗口。' }
+    finally { if (token === this.apiLoadSerial) this.apiProfilesLoading = false }
   }
 
   aboutToDisappear(): void {
+    this.apiLoadSerial++
     if (this.messageClockTimer >= 0) clearInterval(this.messageClockTimer)
     this.importSerial++
     this.stopReply()
@@ -254,28 +254,30 @@ struct Index {
     return options
   }
 
-  private saveAgentApi(): void {
-    const baseUrl = this.apiBaseUrl.trim()
-    const model = this.apiModel.trim()
-    if (!baseUrl.startsWith('https://') && !baseUrl.startsWith('http://')) {
-      this.apiNotice = '服务地址需以 https:// 或 http:// 开头。'
-      return
-    }
-    if (model.length === 0) {
-      this.apiNotice = '请填写模型名称，例如 qwen-plus 或 gpt-4o-mini。'
-      return
-    }
-    try { LocalAgentConfigService.saveRuntime(this.getUIContext().getHostContext() as common.UIAbilityContext, { baseUrl: baseUrl, model: model, apiKey: this.apiKey }) }
-    catch (_error) { this.apiNotice = '配置保存失败，请检查本机存储后重试。'; return }
-    IntegrationService.configureAgent({ baseUrl: baseUrl, model: model, apiKey: this.apiKey })
-    this.apiConfigured = true
-    this.apiNotice = '已保存配置。新发送的消息将由该模型生成。'
-    this.apiSettingsVisible = false
-    this.notice = '外部模型已配置；发送消息后会将问题、对话历史和已选资料发送到该服务。'
+  private applyApiProfiles(archive: AgentProfileArchive): void {
+    const settings = LocalAgentConfigService.active(archive)
+    IntegrationService.configureAgent(settings)
+    this.apiProfiles = LocalAgentConfigService.summaries(archive)
+    this.apiActiveId = archive.activeId
+    this.apiActiveModel = settings.model
+    this.apiConfigured = settings.baseUrl.length > 0 && settings.model.length > 0
+  }
+
+  private refreshApiProfiles(): void {
+    try {
+      const archive = LocalAgentConfigService.readProfiles(this.getUIContext().getHostContext() as common.UIAbilityContext)
+      if (archive) this.applyApiProfiles(archive)
+    } catch (_error) { this.notice = '模型配置读取失败，当前模型保持不变。' }
+  }
+
+  private selectApiProfile(id: string): void {
+    if (this.thinking || this.apiProfilesLoading) return
+    try { this.applyApiProfiles(LocalAgentConfigService.select(this.getUIContext().getHostContext() as common.UIAbilityContext, id)) }
+    catch (error) { this.notice = (error as Error).message || '切换模型失败，请重试。' }
   }
 
   private toggleApiSettings(): void {
-    this.apiNotice = ''
+    if (this.thinking || this.apiProfilesLoading) return
     this.apiSettingsVisible = !this.apiSettingsVisible
   }
 
@@ -944,8 +946,10 @@ struct Index {
 
   private sendMessage(prompt: string, reviewContext: string = ''): void {
     if (this.activeFeature === 'trash') return
+    if (this.apiProfilesLoading) { this.notice = '正在读取模型配置，请稍后发送。'; return }
     const message = prompt.trim() || (this.draftAttachments.length > 0 ? '请分析这些附件。' : '')
     if (message.length === 0 || this.thinking || this.recording || this.voiceBusy || this.attachmentBusy || this.actionBusy) return
+    if (!this.apiConfigured) { this.toggleApiSettings(); return }
     if (!this.activeSession) {
       this.activeSession = SessionService.create(this.activeFeature, '新对话', []).id
     }
@@ -1202,56 +1206,8 @@ struct Index {
 
   @Builder
   ApiSettingsSheet() {
-    Column({ space: 12 * this.fontScale }) {
-      Row() {
-        Column({ space: 3 * this.fontScale }) {
-          Text('配置模型 API').fontSize(21 * this.fontScale).fontWeight(FontWeight.Medium).fontColor(UiTheme.text).id('api-settings-title')
-          Text('兼容 OpenAI Chat Completions API').fontSize(12 * this.fontScale).fontColor(UiTheme.muted)
-        }.alignItems(HorizontalAlign.Start).layoutWeight(1)
-        Button('关闭').height(40 * this.fontScale).fontSize(13 * this.fontScale).fontColor(UiTheme.primary).backgroundColor(UiTheme.raised)
-          .id('api-settings-close').accessibilityText('关闭 API 配置窗口').interactive().onClick(() => this.apiSettingsVisible = false)
-      }.width('100%')
-      Scroll() {
-      Column({ space: 12 * this.fontScale }) {
-      Text('服务地址').fontSize(12 * this.fontScale).fontColor(UiTheme.secondary)
-      TextInput({ text: this.apiBaseUrl, placeholder: '服务地址，例如 https://api.example.com/v1' }).fontSize(13 * this.fontScale).placeholderFont({ size: 13 * this.fontScale })
-        .id('api-base-url').height(44 * this.fontScale).width('100%').backgroundColor(UiTheme.surface).borderRadius(9 * this.fontScale).padding({ left: 12 * this.fontScale, right: 8 * this.fontScale })
-        .caretColor(UiTheme.primary).selectedBackgroundColor('#DDDDDD').inputFeedback().onChange((value: string) => this.apiBaseUrl = value)
-      Text('模型名称').fontSize(12 * this.fontScale).fontColor(UiTheme.secondary)
-      TextInput({ text: this.apiModel, placeholder: '模型名称，例如 qwen-plus、deepseek-chat' }).fontSize(13 * this.fontScale).placeholderFont({ size: 13 * this.fontScale })
-        .id('api-model').height(44 * this.fontScale).width('100%').backgroundColor(UiTheme.surface).borderRadius(9 * this.fontScale).padding({ left: 12 * this.fontScale, right: 8 * this.fontScale })
-        .caretColor(UiTheme.primary).selectedBackgroundColor('#DDDDDD').inputFeedback().onChange((value: string) => this.apiModel = value)
-      Text('API Key').fontSize(12 * this.fontScale).fontColor(UiTheme.secondary)
-      TextInput({ text: this.apiKey, placeholder: 'API Key（无鉴权服务可留空）' }).fontSize(13 * this.fontScale).placeholderFont({ size: 13 * this.fontScale })
-        .id('api-key').type(InputType.Password).height(44 * this.fontScale).width('100%').backgroundColor(UiTheme.surface).borderRadius(9 * this.fontScale).padding({ left: 12 * this.fontScale, right: 8 * this.fontScale })
-        .caretColor(UiTheme.primary).selectedBackgroundColor('#DDDDDD').inputFeedback().onChange((value: string) => this.apiKey = value)
-      Text('对话及你选择的资料、附件会发送到此服务。')
-        .fontSize(11 * this.fontScale).fontColor(UiTheme.muted).lineHeight(18 * this.fontScale).width('100%')
-      if (this.apiNotice.length > 0) {
-        Text(this.apiNotice).fontSize(12 * this.fontScale).fontColor('#666666').lineHeight(18 * this.fontScale).width('100%')
-          .padding(9 * this.fontScale).backgroundColor(UiTheme.raised).borderRadius(8 * this.fontScale)
-      }
-      }.width('100%').alignItems(HorizontalAlign.Start).padding({ right: 8 * this.fontScale, bottom: 8 * this.fontScale })
-      }.width('100%').layoutWeight(1).align(Alignment.TopStart).scrollBar(BarState.Auto)
-      Row({ space: 8 * this.fontScale }) {
-        Button('保存并使用').height(44 * this.fontScale).fontSize(13 * this.fontScale).fontColor(UiTheme.onPrimary).backgroundColor(UiTheme.primary)
-          .id('api-settings-save').interactive().onClick(() => this.saveAgentApi())
-        if (this.apiConfigured) {
-          Button('清除配置').height(44 * this.fontScale).fontSize(12 * this.fontScale).fontColor(UiTheme.secondary).backgroundColor(UiTheme.raised)
-            .interactive().onClick(() => {
-              this.apiBaseUrl = ''
-              this.apiModel = ''
-              this.apiKey = ''
-              IntegrationService.configureAgent({ baseUrl: '', model: '', apiKey: '' })
-              try { LocalAgentConfigService.saveRuntime(this.getUIContext().getHostContext() as common.UIAbilityContext, { baseUrl: '', model: '', apiKey: '' }) } catch (_error) {}
-              this.apiConfigured = false
-              this.apiNotice = '已清除外部模型配置。'
-            })
-        }
-      }.width('100%')
-    }.width('100%').height('100%').alignItems(HorizontalAlign.Start).padding(24 * this.fontScale).backgroundColor(UiTheme.background)
+    ApiProfilesSheet({ onChanged: () => this.refreshApiProfiles(), onClose: () => { this.apiSettingsVisible = false } })
   }
-
   @Builder
   ContextSheet() {
     Column({ space: 12 }) {
@@ -2039,17 +1995,18 @@ struct Index {
               else { Image($r('app.media.ic_microphone')).width(18 * this.fontScale).height(18 * this.fontScale) }
             }.width(32 * this.fontScale).height(36 * this.fontScale).backgroundColor(Color.Transparent).borderRadius(6 * this.fontScale)
               .accessibilityText(this.recording ? '结束录音' : '麦克风语音识别').interactive().onClick(() => this.toggleVoice())
+            Row() {
+            ModelSelector({ profiles: this.apiProfiles, activeId: this.apiActiveId, activeModel: this.apiActiveModel,
+              loading: this.apiProfilesLoading, busy: this.thinking, viewportWidth: this.viewportWidth, viewportHeight: this.viewportHeight,
+              onSelect: (id: string) => this.selectApiProfile(id), onManage: () => this.toggleApiSettings() })
+              .width('100%').constraintSize({ maxWidth: 180 * this.fontScale })
             Blank()
+            }.layoutWeight(1)
             if (this.thinking) { Text('停止').fontSize(12 * this.fontScale).fontColor(UiTheme.primary).height(36 * this.fontScale).padding({ left: 6 * this.fontScale, right: 6 * this.fontScale }).id('chat-stop').interactive().onClick(() => this.stopReply()) }
-            Button({ type: ButtonType.Circle }) {
-              Text('➤').fontSize(15 * this.fontScale).fontColor(UiTheme.onPrimary).rotate({ angle: -45 })
-            }.id('chat-send').width(32 * this.fontScale).height(32 * this.fontScale).backgroundColor(UiTheme.primary).interactive().onClick(() => this.sendMessage(this.inputText))
+            ChatSendButton({ onSend: () => this.sendMessage(this.inputText) })
             }.id('chat-composer-actions').width('100%')
           }.id('chat-composer').width('100%').constraintSize({ maxWidth: 800 * this.fontScale })
             .padding(8 * this.fontScale).backgroundColor(UiTheme.surface).borderRadius(10 * this.fontScale).border({ width: 1, color: UiTheme.border })
-          Text(this.apiConfigured ? `● 已配置 ${IntegrationService.agent.name} · 管理 API` : '配置外部模型 API · 当前尚未连接模型')
-            .fontSize(10 * this.fontScale).fontColor(this.apiConfigured ? UiTheme.primary : UiTheme.muted).width('100%').textAlign(TextAlign.Center)
-            .id('api-settings-open').height(24 * this.fontScale).interactive().onClick(() => this.toggleApiSettings())
         }.width('100%').constraintSize({ maxWidth: 852 * this.fontScale })
           .padding({ left: 26 * this.fontScale, right: 26 * this.fontScale, top: 10 * this.fontScale, bottom: 14 * this.fontScale }).backgroundColor(UiTheme.background)
         } else {
@@ -2078,7 +2035,10 @@ struct Index {
         .bindSheet($$this.artifactVisible, this.ArtifactSheet(), { height: '80%', width: 680,
           preferType: SheetType.CENTER, showClose: false, dragBar: false })
     }.width('100%').height('100%').backgroundColor(UiTheme.background)
-      .onAreaChange((_oldArea: Area, newArea: Area) => { this.viewportWidth = Number.parseFloat(`${newArea.width}`) || 1280 })
+      .onAreaChange((_oldArea: Area, newArea: Area) => {
+        this.viewportWidth = Number.parseFloat(`${newArea.width}`) || 1280
+        this.viewportHeight = Number.parseFloat(`${newArea.height}`) || 800
+      })
       .bindSheet($$this.contextPickerVisible, this.ContextSheet(), { height: '80%', width: 680,
         preferType: SheetType.CENTER, showClose: false, dragBar: false,
         onDisappear: () => { this.contextPickerVisible = false; this.searchSerial++; this.searchBusy = false } })

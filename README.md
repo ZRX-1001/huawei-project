@@ -1,8 +1,8 @@
 # CampusPilot · 杭电校园助手
 
-基于 HarmonyOS、ArkTS 和 ArkUI 的校园助手项目，面向手机和平板，提供对话式入口、课程资料检索和多个校园生活功能页面。当前已接入流式模型对话、可管理的工作区、原位填写与清单交互、Agent 与任务面板联动、本地历史及全局字号设置，业务服务继续通过适配器联调。
+基于 HarmonyOS、ArkTS 和 ArkUI 的校园助手项目，面向手机和平板，提供对话式入口、课程资料检索和多个校园生活功能页面。当前已接入多模型 API 配置、流式对话、可管理的工作区、原位表单、任务面板联动、系统日程与定时任务、本地历史及全局字号设置，业务服务继续通过适配器联调。
 
-本说明对应截至 **2026 年 10 月 27 日** 的工作区代码。按日期记录的开发内容见 [开发日志](CHANGELOG.md)，模块接口及数据约定见 [联调说明](entry/src/main/ets/INTEGRATION.md)。
+本说明对应截至 **2026 年 10 月 28 日** 的工作区代码。按日期记录的开发内容见 [开发日志](CHANGELOG.md)，模块接口及数据约定见 [联调说明](entry/src/main/ets/INTEGRATION.md)。
 
 ## 功能与当前状态
 
@@ -11,7 +11,9 @@
 | 首页与导航 | 启动默认进入首页欢迎页；品牌图标返回首页，点击工作区显示专属欢迎页，发送首条消息才创建会话 |
 | 全局导航 | 最左侧固定首页、定时任务、资料库及设置；工作区/会话栏独立调宽与收起，切换全局页面保留当前会话 |
 | Agent 对话 | 可配置 OpenAI Chat Completions 兼容 API，支持流式回答、停止生成、错误与超时提示 |
+| 多模型配置 | 最多20组独立配置，支持迁移、保存、切换、修改和删除；麦克风右侧显示当前模型，点击搜索选择或管理，当前选择重启保留 |
 | 回答排版 | 原生显示 Markdown 标题、强调、列表、引用、代码块和表格 |
+| 回答操作与时间 | 图标朗读/停止和复制正文；提问与回答右下角显示按日期远近格式化的独立时间，重启保留，旧消息缺失时间不补造 |
 | 思考与执行 | 展开显示简短摘要、检索/附件及实际工具调用、状态、文件与会话产物；可打开当前产物，思考用时结束后固定，切换/重启仍保留；不展示模型内部推演原文 |
 | 工作区 Agent | 内置九组角色预设，支持手动增删工作区；智能助理按对话自动归入已有分区，无匹配时保留在智能助理 |
 | 回收站 | 智能助理与回收站不可删除；删除分区会批量保留其会话，支持只读查看、恢复和永久删除 |
@@ -22,7 +24,7 @@
 | 本地历史 | 保存消息、引用、附件、任务进度及填写/勾选反馈；按最近消息时间倒序，切换顺序稳定，支持回收站与备份恢复 |
 | 侧栏收纳 | 工作区与最近对话共享记录；选中后显示“⋯”，新建入口收进菜单；支持搜索、历史展开、滚动条避让、两侧调宽记忆，以及拖到原宽度1/3后收起 |
 | 界面主题 | 统一黑白灰，用户对话气泡保留淡色区分；页面、侧栏、面板及配置窗口共用主题 |
-| 显示设置 | 左下角设置支持80%–130%字号；气泡、输入提示、填写框、表格及两侧栏控件同步缩放，本地保留 |
+| 显示设置 | 左下角设置支持80%–130%字号；气泡、输入提示、填写框、表格、API配置/模型列表及两侧栏控件同步缩放，本地保留 |
 | 交互反馈 | 按压与悬停反馈、输入框聚焦描边；首页/任务中心/资料库和任务页签短淡入切换，编辑表单、资料预览和执行记录轻量展开，导入及系统读取显示加载状态 |
 | 文件与图片 | 输入框“＋”打开系统文件或图片选择器，支持文档提取及图片随消息发送 |
 | 语音 | 接入系统中文语音识别与朗读，识别结果填入输入框后由用户发送 |
@@ -99,13 +101,14 @@ devecocli run --module entry --device "MatePad Pro 11"
 
 ### 方式一：应用内填写
 
-点击首页或聊天输入框下方的“配置外部模型 API”或“管理 API”，会弹出独立配置窗口，填写：
+点击首页或聊天输入框内、麦克风右侧的模型名称，可切换已保存配置；选择“管理模型 API…”打开独立配置窗口。多组配置可按名称或模型搜索，列表限高滚动，长名称自动省略；没有配置时显示“配置模型”，点击直接进入配置。配置窗口、占位提示和选择列表均跟随全局字号。支持最多20组，可新增、编辑、另存为新配置或删除，每组填写：
 
+- **配置名称**：可选的显示名称，便于区分同名模型的不同服务或账号。
 - **服务地址**：服务商提供的 Chat Completions 兼容根地址，例如 `https://api.example.com/v1`。
 - **模型名称**：该服务实际支持的模型 ID。
 - **API Key**：对应密钥；无鉴权的本地服务可以留空。
 
-应用会拼接 `/chat/completions`，请勿将示例地址当作可用服务。当前应用内配置保存在运行时内存中；需启动时自动载入配置时使用下方本地文件方式。
+应用会拼接 `/chat/completions`，请勿将示例地址当作可用服务。“仅保存”保留当前模型，“保存并使用”立即选中该配置；删除当前配置会切换到剩余配置，删除最后一组后停止使用模型。配置和当前选择保存在设备应用私有首选项，重启保留；普通对话和后台定时任务在下次请求时使用所选模型，已开始的请求保持原配置。
 
 ### 方式二：本地文件自动载入
 
@@ -125,7 +128,7 @@ Copy-Item entry/src/main/resources/rawfile/local_api.example.json entry/src/main
 }
 ```
 
-修改后重新构建部署，应用启动时读取该文件。`local_api.json` 已被 `.gitignore` 忽略；提交前可检查：
+重新构建部署后，首次初始化会将原有单组配置或该文件内容迁为默认配置；已有多配置存档时，以应用内配置为准。删除所有配置后不会从文件自动恢复，后续可在应用内新增。`local_api.json` 已被 `.gitignore` 忽略；提交前可检查：
 
 ```powershell
 git check-ignore entry/src/main/resources/rawfile/local_api.json
@@ -185,10 +188,10 @@ AppScope/                         应用标识与全局资源
 entry/src/main/
 ├── ets/
 │   ├── pages/Index.ets           主界面、侧栏、对话及功能入口
-│   ├── components/              Markdown、思路摘要、交互回执及原位表单组件
+│   ├── components/              Markdown、执行记录、原位表单、模型选择/配置及输入控件
 │   ├── config/                  API/检索参数、工作区角色和黑白主题
 │   ├── models/                  消息、检索、附件、交互反馈及适配器类型
-│   ├── services/                对话工具、工作区/侧栏、交互反馈、存储、检索及语音
+│   ├── services/                模型配置、对话工具、工作区/侧栏、存储、检索及语音
 │   ├── entryability/            应用生命周期入口
 │   └── INTEGRATION.md           模块联调约定
 ├── resources/rawfile/
@@ -213,21 +216,18 @@ $devEcoRoot = 'F:\DevEco Studio'
 $nodeExe = Join-Path $devEcoRoot 'tools\node\node.exe'
 $typescriptModule = Join-Path $devEcoRoot 'tools\ohpm\node_modules\typescript\lib\typescript.js'
 
-& $nodeExe tests/gateway-stream.test.cjs $typescriptModule
-& $nodeExe tests/markdown-presentation.test.cjs $typescriptModule
-& $nodeExe tests/session-persistence.test.cjs $typescriptModule
-& $nodeExe tests/attachments-voice.test.cjs $typescriptModule
-& $nodeExe tests/workspace-agent.test.cjs $typescriptModule
-& $nodeExe tests/sidebar-navigation.test.cjs $typescriptModule
-& $nodeExe tests/interaction-feedback.test.cjs $typescriptModule
-& $nodeExe tests/system-schedule.test.cjs $typescriptModule
-& $nodeExe tests/library-agent-tasks.test.cjs $typescriptModule
+foreach ($test in (Get-ChildItem tests -Filter '*.test.cjs')) {
+    & $nodeExe $test.FullName $typescriptModule
+    if ($LASTEXITCODE -ne 0) { throw "测试失败：$($test.Name)" }
+}
 ```
 
 | 脚本 | 覆盖范围 |
 | --- | --- |
 | `gateway-stream.test.cjs` | SSE 分片、推理内容隔离、增量工具参数及结果回传、取消、轮数限制与 JSON 兼容 |
 | `markdown-presentation.test.cjs` | Markdown 解析、正文排版数据与思路摘要处理 |
+| `api-profiles.test.cjs` | 多配置迁移、密钥隔离、仅保存与切换、后台缓存刷新、重启、删除、失败回滚、容量限制及初始化竞争 |
+| `message-time.test.cjs` | 日期/周界/年界、发送与完成时间、旧消息缺失值、完成时间固定和相对日期显示 |
 | `execution-trace.test.cjs` | 实际回执与产物差异、失败/取消、敏感信息过滤、固定用时和旧历史兼容，不把请求参数伪装成已执行命令 |
 | `session-persistence.test.cjs` | 历史、宽度、字号及面板开关保存，交互反馈重启保留、稳定排序、保护分区、批量回收与恢复、失败回滚、附件生命周期及备份恢复 |
 | `attachments-voice.test.cjs` | 附件导入与提取、请求内容组织及语音适配器行为 |
@@ -238,6 +238,8 @@ $typescriptModule = Join-Path $devEcoRoot 'tools\ohpm\node_modules\typescript\li
 | `library-agent-tasks.test.cjs` | 资料独立副本、索引JSON与向量、删除保护、检索开关、原子存档、周期及过期合并、跨进程认领、只读任务执行、对话创建与配置持久化 |
 
 模拟器已验证真实模型流式回答及工具联动、自动归类、任务与产物保存、批量回收及恢复、独立 API 配置窗口、选中后显示菜单、两侧栏调宽、黑白主题，以及打开旧会话后冷启动仍进入首页。文件/图片选择器与麦克风授权入口已验证；实际语音转写质量及不同真机适配仍需设备测试。
+
+多模型配置已验证原配置迁移、保存/选择第二组、冷启动保留、删除恢复与真实对话。使用独立测试应用验证空配置、20组配置、80%/130%字号和窄布局，覆盖搜索选择第20项、列表限高滚动、表单末字段可达性及发送图标居中；测试不改动真实API，测试应用已卸载。上述设备验证使用MatePad Pro 11模拟器。
 
 
 ## 开发记录

@@ -9,3 +9,20 @@ export interface AgentApiSettings {
   model: string
   apiKey: string
 }
+
+export interface AgentApiProfile extends AgentApiSettings {
+  id: string
+  name: string
+}
+
+export interface AgentProfileSummary {
+  id: string
+  name: string
+  model: string
+}
+
+export interface AgentProfileArchive {
+  version: number
+  activeId: string
+  items: AgentApiProfile[]
+}

@@ -23,8 +23,8 @@ const workScheduler = { NetworkType: { NETWORK_TYPE_ANY: 0 }, obtainAllWorks: as
 const kits = {
   '@kit.CoreFileKit': { fileIo }, '@kit.ArkTS': { util: { generateRandomUUID: () => `uuid-${sequence++}` } },
   '@kit.BackgroundTasksKit': { workScheduler },
-  '@kit.ArkData': { preferences: { getPreferencesSync: () => ({ getSync: (k, fallback) => prefs.get(k) || fallback,
-    putSync: (k, v) => prefs.set(k, v), flushSync() {} }) } }
+  '@kit.ArkData': { preferences: { removePreferencesFromCacheSync() {}, getPreferencesSync: () => ({ getSync: (k, fallback) => prefs.get(k) || fallback,
+    putSync: (k, v) => prefs.set(k, v), deleteSync: k => prefs.delete(k), flushSync() {} }) } }
 };
 class FakeGateway {
   cancel() { this.cancelled = true; }

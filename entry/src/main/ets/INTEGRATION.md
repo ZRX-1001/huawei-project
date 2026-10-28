@@ -39,9 +39,9 @@
 
 ## Agent 消息流
 
-聊天页底部的“配置外部模型 API”可连接 OpenAI Chat Completions 兼容服务。填写服务根地址（例如 `https://api.example.com/v1`）、模型名称和可选 API Key；可选 Key 适用于本地或无鉴权服务。应用会在请求时拼接 `/chat/completions`，发送系统指令、当前功能 ID、最近 12 条历史（每条最多 4000 字符）、当前问题及合并后的检索资料。`ohos.permission.INTERNET` 已在 entry 模块声明。
+输入框内麦克风右侧的模型名称可切换已保存配置；菜单“管理模型 API…”打开配置窗口，支持最多20组独立的名称、服务地址、模型和可选API Key。填写服务根地址（例如 `https://api.example.com/v1`）；可选 Key 适用于本地或无鉴权服务。应用会在请求时拼接 `/chat/completions`，发送系统指令、当前功能 ID、最近 12 条历史（每条最多 4000 字符）、当前问题及合并后的检索资料。`ohos.permission.INTERNET` 已在 entry 模块声明。
 
-也可直接编辑 `entry/src/main/resources/rawfile/local_api.json`，应用启动时会尝试读取。该文件已加入 `.gitignore`，不会被常规 `git add` 和提交上传；`local_api.example.json` 提供无密钥模板。配置示例：
+也可直接编辑 `entry/src/main/resources/rawfile/local_api.json`，首次初始化多配置存档时会读取。原有运行时单配置优先迁移；一旦已有多配置存档，配置文件不再覆盖应用内选择，清空配置也不自动复活文件中的密钥。该文件已加入 `.gitignore`，不会被常规 `git add` 和提交上传；`local_api.example.json` 提供无密钥模板。配置示例：
 
 ```json
 {
@@ -131,7 +131,9 @@ Agent 气泡使用 `MarkdownContent` 原生渲染标题、粗体/斜体、列表
 
 ## 独立 API 配置面板
 
-欢迎页与会话页底部入口统一控制 `apiSettingsVisible`，通过主内容容器的独立 `bindSheet` 打开 `ApiSettingsSheet`，与上下文弹窗使用不同锚点。配置表单不再嵌入消息滚动区或欢迎内容，面板内部单独滚动；API Key 继续使用密码输入。保存成功关闭窗口，校验失败留在窗口显示具体提示，关闭与遮罩退出不调用保存。
+欢迎页与会话页共用输入区`ModelSelector`，自定义弹层和管理窗口复用`ApiProfileList`的搜索、限高滚动、当前项标记与字号缩放；0配置直接打开配置窗口。`apiSettingsVisible`通过主内容容器独立`bindSheet`打开`ApiProfilesSheet`，与上下文弹窗使用不同锚点。窗口支持新建、编辑、另存、仅保存、保存并使用及删除；API Key使用密码输入，全部输入提示显式跟随全局字号。关闭或遮罩退出不保存草稿，保存并使用成功后关闭，校验或存储失败留在窗口提示。
+
+`LocalAgentConfigService`在`agent_runtime`私有首选项的`profiles_v1`中统一保存配置列表和activeId，一次flush提交，失败回滚缓存；迁移后移除旧settings副本。UI列表只取得id/name/model摘要，不展示服务地址和密钥；模型菜单切换成功后才更换网关，生成过程中禁用切换。后台每次执行先刷新进程内首选项缓存，再通过同一服务读取activeId所选配置，已创建的网关保留自身设置快照。损坏存档保留且不静默回退到另一服务，删除最后一组后持久保留空存档。
 
 
 ## 黑白界面主题
