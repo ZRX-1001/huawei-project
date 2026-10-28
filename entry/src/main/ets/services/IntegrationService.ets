@@ -6,6 +6,8 @@ import { AgentApiSettings } from '../config/ApiConfig'
 import { OpenAiCompatibleGateway } from './OpenAiCompatibleGateway'
 import { common } from '@kit.AbilityKit'
 import { HarmonyVoiceAdapter } from './HarmonyVoiceAdapter'
+import { HarmonyFocusModuleAdapter } from './HarmonyFocusModuleAdapter'
+import { PrivacyModuleAdapter } from './PrivacyModuleAdapter'
 import { HarmonyScheduleAdapter } from './HarmonyScheduleAdapter'
 import { SchedulePlatform } from '../models/ScheduleModels'
 import { LibraryService } from './LibraryService'
@@ -58,6 +60,7 @@ export class IntegrationService {
   static forms: ModuleAdapter = new UnavailableModule('表单')
   static study: ModuleAdapter = new UnavailableModule('学习课程')
   static hardware: ModuleAdapter = new UnavailableModule('自律魔方')
+  static privacy: ModuleAdapter = new UnavailableModule('隐私与档案')
   static voice: VoiceAdapter = new UnavailableVoice()
   static schedule: SchedulePlatform | undefined = undefined
   static initializeSchedule(context: common.UIAbilityContext): void {
@@ -65,6 +68,13 @@ export class IntegrationService {
   }
   static initializeVoice(context: common.UIAbilityContext): void {
     if (IntegrationService.voice instanceof UnavailableVoice) IntegrationService.voice = new HarmonyVoiceAdapter(context)
+  }
+  static initializeDeviceServices(context: common.UIAbilityContext): void {
+    if (IntegrationService.hardware instanceof UnavailableModule) IntegrationService.hardware = new HarmonyFocusModuleAdapter(context)
+    if (IntegrationService.privacy instanceof UnavailableModule) IntegrationService.privacy = new PrivacyModuleAdapter(context)
+  }
+  static disposeDeviceServices(): void {
+    if (IntegrationService.hardware instanceof HarmonyFocusModuleAdapter) IntegrationService.hardware.dispose()
   }
   static rag(): RagService { return new RagService(IntegrationService.knowledge, IntegrationService.embedder) }
   static configureAgent(settings: AgentApiSettings): void {
