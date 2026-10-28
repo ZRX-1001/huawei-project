@@ -1,6 +1,6 @@
 # 硬件、语音、隐私与工程交付说明
 
-本文对应当前 `feature/wuyuhao-task-complete` 分支，覆盖 M4、M6、M8/M9、M11/M12。原则是先复用 HarmonyOS 自带 Kit，不伪造未授权或未验证的系统能力。
+本文对应当前 `feature/focus-hardware-privacy` 分支，覆盖 M4、M6、M8/M9、M11/M12。原则是先复用 HarmonyOS 自带 Kit，不伪造未授权或未验证的系统能力。
 
 ## 1. 能力映射
 

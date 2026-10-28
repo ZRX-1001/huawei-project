@@ -37,7 +37,7 @@
 | 隐私与档案 | Preferences + HUKS AES-GCM 加密学生档案，敏感字段脱敏，支持上传前授权状态 |
 | 功能页面 | 包含智能助理、求职实验室、智能日程、消费洞察、表单填报、自律魔方、隐私与档案、健康计划、天气穿搭、学习助手 |
 
-任务面板及日程、消费页面的任务和产物使用当前会话的真实本地状态。自律魔方已接入 BLE GATT 通知协议、NFC 标签和专注状态机；系统级锁机仍需 Screen Time Guard ACL 与真机授权。表单、学习课程等适配器未接入时会明确返回失败。参考硬件、固件和联调步骤见 [硬件、语音与隐私说明](docs/HARDWARE_VOICE_SECURITY.md)、[验收指南](docs/VERIFY_WUYUHAO_TASKS.md) 与 [ESP32-C3 参考硬件](hardware/esp32_focus_cube/README.md)。
+任务面板及日程、消费页面的任务和产物使用当前会话的真实本地状态。自律魔方已接入 BLE GATT 通知协议、NFC 标签和专注状态机；系统级锁机仍需 Screen Time Guard ACL 与真机授权。表单、学习课程等适配器未接入时会明确返回失败。参考硬件、固件和联调步骤见 [硬件、语音与隐私说明](docs/HARDWARE_VOICE_SECURITY.md)、[验收指南](docs/VERIFY_FOCUS_PRIVACY.md) 与 [ESP32-C3 参考硬件](hardware/esp32_focus_cube/README.md)。
 
 ## 系统日程、提醒与备忘录
 

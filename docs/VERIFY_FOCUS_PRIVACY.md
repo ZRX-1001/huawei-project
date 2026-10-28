@@ -1,6 +1,6 @@
-# 吴宇豪任务验收指南
+# 自律魔方与隐私模块验收指南
 
-适用分支：`feature/wuyuhao-task-complete`
+适用分支：`feature/focus-hardware-privacy`
 
 ## 1. 当前已验证结果
 
@@ -31,7 +31,7 @@ devecocli build
 
 通过标准：
 
-- 当前分支为 `feature/wuyuhao-task-complete`。
+- 当前分支为 `feature/focus-hardware-privacy`。
 - 输出包含 `BUILD SUCCESSFUL`。
 - HAP 生成于 `entry/build/default/outputs/default/entry-default-unsigned.hap`。
 
