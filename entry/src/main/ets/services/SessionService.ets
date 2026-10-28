@@ -71,6 +71,8 @@ export class SessionService {
           message.thinkingDurationMs = settled.thinkingDurationMs
           message.thinkingLastActiveAt = settled.thinkingLastActiveAt
           message.executions = settled.executions
+          if (Number.isFinite(message.createdAt) && message.createdAt! > 0 && !Number.isFinite(message.completedAt) &&
+            Number.isFinite(end) && end > 0) message.completedAt = end
           message.content = message.status === 'loading' ? '上次生成已中断，可以继续发送消息。' : message.content
           message.status = 'stopped'
           message.meta = '上次生成已中断'

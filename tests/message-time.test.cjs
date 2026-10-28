@@ -1,0 +1,44 @@
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const assert = require('node:assert/strict');
+const ts = require(process.argv[2] || 'typescript');
+const source = fs.readFileSync(path.join(__dirname, '../entry/src/main/ets/services/MessageTimeService.ets'), 'utf8');
+const exportsObject = {};
+vm.runInNewContext(ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS,
+  target: ts.ScriptTarget.ES2020 } }).outputText, { exports: exportsObject, Date });
+const time = exportsObject.MessageTimeService;
+const at = (year, month, day, hour = 10, minute = 0) => new Date(year, month - 1, day, hour, minute).getTime();
+const now = at(2026, 10, 30, 12);
+assert.equal(time.format(at(2026, 10, 30, 8, 5), now), '08:05');
+assert.equal(time.format(at(2026, 10, 29), now), '星期四10:00');
+assert.equal(time.format(at(2026, 10, 26, 0), now), '星期一00:00');
+assert.equal(time.format(at(2026, 10, 25, 23, 59), now), '10月25日23:59', 'Sunday belongs to the previous calendar week');
+assert.equal(time.format(at(2026, 9, 3), now), '9月3日10:00');
+assert.equal(time.format(at(2020, 3, 2), now), '2020年3月2日10:00');
+assert.equal(time.format(at(2025, 12, 31), at(2026, 1, 2)), '2025年12月31日10:00', 'cross-year dates must include the year even in the same week');
+assert.equal(time.format(at(2026, 11, 1), now), '11月1日10:00', 'future dates must not look like a past weekday');
+assert.equal(time.full(at(2026, 10, 29)), '2026年10月29日10:00');
+for (const value of [undefined, null, NaN, Infinity, -1, 0, 9e15, '2026-10-30']) {
+  assert.equal(time.format(value, now), '时间未记录');
+}
+const createdAt = at(2026, 10, 29, 10);
+const completedAt = at(2026, 10, 29, 10, 1);
+const user = { role: 'user', content: '问题', meta: '现在', createdAt };
+const pending = { role: 'agent', content: '', meta: '', createdAt, status: 'streaming' };
+assert.equal(time.timestamp(user), createdAt);
+assert.equal(time.timestamp({ ...user, completedAt }), createdAt, 'user time is the send time');
+assert.equal(time.label(pending, now), '生成中');
+assert.equal(time.completed(pending, 'streaming', completedAt), undefined);
+assert.equal(time.completed(pending, 'complete', completedAt), completedAt);
+const finished = { ...pending, completedAt, status: 'complete' };
+assert.equal(time.timestamp(finished), completedAt);
+assert.equal(time.completed(finished, 'stopped', now), completedAt, 'later updates must preserve the original completion timestamp');
+assert.equal(time.label(finished, now), '星期四10:01');
+assert.equal(time.label(finished, at(2027, 1, 1)), '2026年10月29日10:01', 'display adapts to the date while the stored time stays fixed');
+assert.equal(finished.completedAt, completedAt);
+const legacy = { role: 'agent', content: '旧回答', meta: '现在', status: 'complete' };
+assert.equal(time.timestamp(legacy), undefined, 'unknown old message dates must never borrow the session or current time');
+assert.equal(time.completed(legacy, 'stopped', now), undefined);
+assert.equal(time.timestamp({ ...legacy, thinkingStartedAt: createdAt, thinkingLastActiveAt: completedAt }), completedAt);
+console.log('PASS: local date/week/year boundaries, invalid and legacy dates, distinct send/completion times, fixed completion and relative display.');

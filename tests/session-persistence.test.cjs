@@ -219,7 +219,7 @@ try {
   const traceOther = service.create('home', 'another reply', []);
   const traceStart = now;
   service.saveMessages(traceSession.id, [{role:'agent',content:'partial',meta:'',status:'streaming',thinkingStartedAt:traceStart,
-    thinkingLastActiveAt:traceStart,executionId:'execution-a'}]);
+    thinkingLastActiveAt:traceStart,executionId:'execution-a',createdAt:traceStart}]);
   const traceOrder = service.get(traceSession.id).updatedAt;
   const traceRecord = {id:'tool-1',kind:'tool',name:'get_system_time',title:'读取时间',status:'running',startedAt:traceStart,input:'',detail:'waiting',targets:[]};
   now += 2700;
@@ -230,6 +230,8 @@ try {
   service = boot();
   const interrupted = service.get(traceSession.id).messages[0];
   assert.equal(interrupted.thinkingDurationMs,2700);
+  assert.equal(interrupted.createdAt,traceStart,'message creation time survives restart');
+  assert.equal(interrupted.completedAt,traceStart+2700,'interrupted reply time freezes at the last saved snapshot');
   assert.equal(interrupted.executions[0].status,'interrupted');
   now += 40000;
   service.recordExecution(traceSession.id,'execution-a',{...traceRecord,status:'success',finishedAt:traceStart+2700,detail:'real receipt'});
@@ -238,6 +240,7 @@ try {
   assert.equal(service.get(traceSession.id).messages[0].thinkingDurationMs,2700);
   service = boot();
   assert.equal(service.get(traceSession.id).messages[0].thinkingDurationMs,2700,'reopening and later receipts never restart elapsed time');
+  assert.equal(service.get(traceSession.id).messages[0].completedAt,traceStart+2700,'late tool receipts must not change the visible answer time');
   assert.equal(service.get(traceSession.id).messages[0].executions[0].detail,'real receipt');
   service.trash(traceSession.id); service.remove(traceSession.id);
   assert.equal(service.recordExecution(traceSession.id,'execution-a',traceRecord),undefined,'late results cannot resurrect deleted messages');

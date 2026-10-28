@@ -32,6 +32,14 @@ import { AgentTaskManager } from '../services/AgentTaskManager'
 import { util } from '@kit.ArkTS'
 import { ExecutionRecord } from '../models/ExecutionModels'
 import { ExecutionTraceService } from '../services/ExecutionTraceService'
+import { MessageTimeService } from '../services/MessageTimeService'
+import { ReplyActions } from '../components/ReplyActions'
+
+// Drive native layout each frame instead of stretching the final text layout.
+@AnimatableExtend(Row)
+function panelLayoutWidth(value: number) {
+  .width(value)
+}
 
 class ChatStreamSink implements StreamSink {
   private cancelled: () => boolean
@@ -125,6 +133,9 @@ struct Index {
   @State recording: boolean = false
   @State voiceBusy: boolean = false
   @State speaking: boolean = false
+  @State speakingReply: string = ''
+  @State messageClock: number = Date.now()
+  private messageClockTimer: number = -1
   @State actionBusy: boolean = false
   @State moduleNotice: string = ''
   @State moduleItems: ModuleItem[] = []
@@ -154,6 +165,8 @@ struct Index {
   private workspaceProfile(id: string = this.activeFeature): WorkspaceProfile { return WorkspaceConfig.profile(id, this.features) }
 
   aboutToAppear(): void {
+    this.messageClock = Date.now()
+    this.messageClockTimer = setInterval(() => { this.messageClock = Date.now() }, 60000)
     this.features = SessionService.workspaces()
     const host = this.getUIContext().getHostContext() as common.UIAbilityContext
     IntegrationService.initializeLibrary(host)
@@ -201,6 +214,7 @@ struct Index {
   }
 
   aboutToDisappear(): void {
+    if (this.messageClockTimer >= 0) clearInterval(this.messageClockTimer)
     this.importSerial++
     this.stopReply()
     this.persistSession()
@@ -418,18 +432,21 @@ struct Index {
     this.speechSerial++
     if (this.speaking) IntegrationService.voice.stopSpeaking().catch(() => {})
     this.speaking = false
+    this.speakingReply = ''
   }
 
-  private async toggleSpeech(content: string): Promise<void> {
+  private async toggleSpeech(content: string, reply: string): Promise<void> {
     if (this.recording || this.voiceBusy) return
-    if (this.speaking) { this.stopSpeech(); return }
+    if (this.speaking && this.speakingReply === reply) { this.stopSpeech(); return }
+    if (this.speaking) this.stopSpeech()
     const token = ++this.speechSerial
     this.speaking = true
+    this.speakingReply = reply
     const text = MarkdownParser.parse(MarkdownParser.answer(content).body).map((block) =>
       MarkdownParser.inline(block.text).map((run) => run.text).join('')).join('\n')
     try { await IntegrationService.voice.speak(text.slice(0, 8000)) }
     catch (error) { if (token === this.speechSerial) this.notice = (error as Error).message || '语音播报暂不可用。' }
-    finally { if (token === this.speechSerial) this.speaking = false }
+    finally { if (token === this.speechSerial) { this.speaking = false; this.speakingReply = '' } }
   }
 
   private stopReply(): void {
@@ -444,9 +461,11 @@ struct Index {
   }
 
   private updateReply(position: number, content: string, meta: string, status: string, sources: SourceCitation[], phase: string = ''): void {
+    this.messageClock = Date.now()
     this.messages = this.messages.map((item: AgentMessage, index: number): AgentMessage => {
       if (index !== position) return item
       const next = ExecutionTraceService.settle(item, status)
+      next.completedAt = MessageTimeService.completed(item, status)
       next.role = 'agent'; next.content = content; next.meta = meta; next.sources = sources
       next.renderRevision = (item.renderRevision || 0) + 1
       next.phase = phase || (status === 'streaming' ? 'answering' : item.phase)
@@ -877,8 +896,11 @@ struct Index {
     return Math.min(Math.max(side === 'left' ? this.leftWidth : this.rightWidth, minimum), available)
   }
 
-  private railWidth(): number { return 52 * Math.max(1, this.fontScale) }
   private globalRailWidth(): number { return 52 * Math.max(1, this.fontScale) }
+
+  private chatPlaceholder(): string {
+    return this.activeFeature === 'home' ? '向 CampusPilot 描述你的下一步…' : `在${this.selectedFeature().name}中，想做些什么…`
+  }
 
   private resizePanel(side: string, offset: number): void {
     const maximum = Math.max(SidebarService.panelMinimum(side, this.fontScale), this.viewportWidth - this.globalRailWidth() - 360 -
@@ -895,10 +917,8 @@ struct Index {
     this.resizingPanel = ''
     this.pendingPanelCollapse = ''
     if (side && !cancelled) {
-      this.getUIContext().animateTo({ duration: 180, curve: Curve.EaseOut }, () => {
-        if (side === 'left') { this.leftWidth = Math.max(this.dragStartWidth, SidebarService.panelMinimum(side, this.fontScale)); this.isLeftPanelVisible = false }
-        else { this.rightWidth = Math.max(this.dragStartWidth, SidebarService.panelMinimum(side, this.fontScale)); this.isTaskPanelVisible = false }
-      })
+      if (side === 'left') { this.leftWidth = Math.max(this.dragStartWidth, SidebarService.panelMinimum(side, this.fontScale)); this.isLeftPanelVisible = false }
+      else { this.rightWidth = Math.max(this.dragStartWidth, SidebarService.panelMinimum(side, this.fontScale)); this.isTaskPanelVisible = false }
     }
     this.persistSidebar()
   }
@@ -942,13 +962,14 @@ struct Index {
     const attachments = reviewContext ? [] : this.draftAttachments.slice()
     const executionId = util.generateRandomUUID()
     const startedAt = Date.now()
+    this.messageClock = startedAt
     const secrets = [IntegrationService.agentSettings.apiKey, IntegrationService.agentSettings.baseUrl]
     const retrievalRecord: ExecutionRecord = { id: 'retrieval', kind: 'retrieval', name: 'local_retrieval', title: '检索与引用资料',
       status: 'running', startedAt: startedAt, input: '', detail: '正在查找本地资料及已选上下文。', targets: [] }
     if (!reviewContext) this.draftAttachments = []
-    this.messages = [...this.messages, { role: 'user', content: message, meta: '现在', attachments: attachments }]
+    this.messages = [...this.messages, { role: 'user', content: message, meta: '现在', attachments: attachments, createdAt: startedAt }]
     this.messages = [...this.messages, { role: 'agent', content: '', meta: '正在检索资料', status: 'loading',
-      sources: [], thinkingStartedAt: startedAt, thinkingLastActiveAt: startedAt, phase: 'retrieving', executionId: executionId,
+      sources: [], createdAt: startedAt, thinkingStartedAt: startedAt, thinkingLastActiveAt: startedAt, phase: 'retrieving', executionId: executionId,
       executions: attachments.length > 0 ? [retrievalRecord, ExecutionTraceService.attachments(attachments, secrets)] : [retrievalRecord] }]
     const replyIndex = this.messages.length - 1
     if (!reviewContext) this.inputText = ''
@@ -1068,19 +1089,15 @@ struct Index {
   }
 
   private toggleLeftPanel(): void {
-    this.getUIContext().animateTo({ duration: 260, curve: Curve.EaseInOut }, () => {
-      this.isLeftPanelVisible = !this.isLeftPanelVisible
-      this.leftWidth = Math.max(this.leftWidth, SidebarService.panelMinimum('left', this.fontScale))
-      this.persistSidebar()
-    })
+    this.isLeftPanelVisible = !this.isLeftPanelVisible
+    this.leftWidth = Math.max(this.leftWidth, SidebarService.panelMinimum('left', this.fontScale))
+    this.persistSidebar()
   }
 
   private toggleTaskPanel(): void {
-    this.getUIContext().animateTo({ duration: 260, curve: Curve.EaseInOut }, () => {
-      this.isTaskPanelVisible = !this.isTaskPanelVisible
-      this.rightWidth = Math.max(this.rightWidth, SidebarService.panelMinimum('right', this.fontScale))
-      this.persistSidebar()
-    })
+    this.isTaskPanelVisible = !this.isTaskPanelVisible
+    this.rightWidth = Math.max(this.rightWidth, SidebarService.panelMinimum('right', this.fontScale))
+    this.persistSidebar()
   }
 
   @Builder
@@ -1452,7 +1469,6 @@ struct Index {
   @Builder
   SidebarContent() {
     Column() {
-      if (this.isLeftPanelVisible) {
         Row({ space: 8 * this.fontScale }) {
           Row({ space: 8 * this.fontScale }) {
           Text('CampusPilot').fontSize(14 * this.fontScale).fontColor('#E1E1E1').layoutWeight(1)
@@ -1542,26 +1558,7 @@ struct Index {
           Text(this.apiConfigured ? '模型已配置' : '尚未配置模型').fontSize(10 * this.fontScale).fontColor('#858585').layoutWeight(1)
           Text('本地保存').fontSize(10 * this.fontScale).fontColor('#686868')
         }.height(32 * this.fontScale).width('100%').padding({ left: 8 * this.fontScale, right: 8 * this.fontScale }).margin({ top: 6 * this.fontScale })
-      } else {
-        Button({ type: ButtonType.Normal }) { Image($r('app.media.ic_sidebar')).width(21 * this.fontScale).height(21 * this.fontScale) }
-          .width(36 * this.fontScale).height(38 * this.fontScale).padding(0).backgroundColor(Color.Transparent).id('sidebar-legacy-expand').accessibilityText('展开左侧边栏')
-          .interactive().onClick(() => this.toggleLeftPanel())
-        if (this.sidebarSelection === 'section-conversations') {
-          Button({ type: ButtonType.Normal }) { Image($r('app.media.ic_more_horizontal')).width(21 * this.fontScale).height(21 * this.fontScale) }
-            .width(36 * this.fontScale).height(38 * this.fontScale).padding(0).margin({ top: 8 * this.fontScale }).backgroundColor(Color.Transparent)
-            .id('sidebar-conversations-menu-rail').accessibilityText('对话操作')
-            .interactive().bindMenu([{ value: '新建对话', action: () => this.createChat() }])
-        } else {
-          Button({ type: ButtonType.Normal }) { Image($r('app.media.ic_compose')).width(21 * this.fontScale).height(21 * this.fontScale) }
-            .width(36 * this.fontScale).height(38 * this.fontScale).padding(0).margin({ top: 8 * this.fontScale }).backgroundColor(Color.Transparent)
-            .id('sidebar-conversations-rail').accessibilityText('选中对话入口')
-            .interactive().onClick(() => this.sidebarSelection = 'section-conversations')
-        }
-        Blank()
-        Text('C').fontSize(13 * this.fontScale).fontColor('#999999').height(32 * this.fontScale).width(36 * this.fontScale).textAlign(TextAlign.Center)
-          .id('brand-home-rail').accessibilityText('CampusPilot，返回首页').interactive().onClick(() => this.openHome())
-      }
-    }.width(this.isLeftPanelVisible ? this.panelWidth('left') : this.railWidth()).height('100%').padding(this.isLeftPanelVisible ? 12 * this.fontScale : 8)
+    }.width(this.panelWidth('left')).height('100%').padding(12 * this.fontScale).clip(true)
       .backgroundColor('#191919').alignItems(HorizontalAlign.Start)
       .bindSheet($$this.workspaceEditorVisible, this.WorkspaceEditor(), { height: '78%', width: 600,
         preferType: SheetType.CENTER, showClose: false, dragBar: false })
@@ -1645,10 +1642,8 @@ struct Index {
         .onActionEnd((event: GestureEvent) => { this.resizePanel(side, event.offsetX); this.finishPanelResize() })
         .onActionCancel(() => this.finishPanelResize(true)))
       .parallelGesture(TapGesture({ count: 2 }).onAction(() => {
-        this.getUIContext().animateTo({ duration: 180, curve: Curve.EaseOut }, () => {
-          if (side === 'left') this.leftWidth = Math.max(256, SidebarService.panelMinimum(side, this.fontScale))
-          else this.rightWidth = Math.max(274, SidebarService.panelMinimum(side, this.fontScale))
-        })
+        if (side === 'left') this.leftWidth = Math.max(256, SidebarService.panelMinimum(side, this.fontScale))
+        else this.rightWidth = Math.max(274, SidebarService.panelMinimum(side, this.fontScale))
         this.persistSidebar()
       }))
   }
@@ -1811,8 +1806,7 @@ struct Index {
           .interactive().onClick(() => this.showArtifact(item))
       }, (item: WorkspaceArtifact) => `${this.activeSession}-${item.id}-${item.title}-${item.content}`)
     }.width('100%').padding(14 * this.fontScale).alignItems(HorizontalAlign.Start)
-    }.id('task-panel').width(this.panelWidth('right')).height('100%').backgroundColor(UiTheme.background).align(Alignment.TopStart).scrollBar(BarState.Auto)
-      .transition(TransitionEffect.OPACITY.animation({ duration: 180 }))
+    }.id('task-panel').width(this.panelWidth('right')).height('100%').backgroundColor(UiTheme.background).align(Alignment.TopStart).scrollBar(BarState.Auto).clip(true)
   }
 
   private navigateSection(section: string): void {
@@ -1890,8 +1884,10 @@ struct Index {
           .width('100%').height('100%').transition(UiMotion.page())
       } else {
       Row() {
-      if (this.isLeftPanelVisible) { this.SidebarContent() }
-      if (this.isLeftPanelVisible) { this.ResizeHandle('left') }
+      Row() { this.SidebarContent(); this.ResizeHandle('left') }
+        .panelLayoutWidth(this.isLeftPanelVisible ? this.panelWidth('left') + 8 : 0)
+        .animation({ duration: this.resizingPanel ? 0 : 220, curve: Curve.EaseInOut })
+        .height('100%').clip(true).id('left-panel-slot')
 
       Column() {
         Row() {
@@ -1956,7 +1952,6 @@ struct Index {
                   } else {
                     Text(message.content).fontSize(15 * this.fontScale).fontColor(UiTheme.text).lineHeight(23 * this.fontScale).copyOption(CopyOptions.InApp)
                   }
-                  Text(message.meta).fontSize(10 * this.fontScale).fontColor('#999999')
                   ForEach(message.sources || [], (source: SourceCitation) => {
                     Column({ space: 5 * this.fontScale }) {
                       Text(`[${source.number}] ${source.title} · ${source.location}`).fontSize(11 * this.fontScale).fontColor(UiTheme.primary).width('100%')
@@ -1966,13 +1961,26 @@ struct Index {
                       }
                     }.width('100%').padding(8 * this.fontScale).backgroundColor(UiTheme.raised).borderRadius(8 * this.fontScale)
                   }, (source: SourceCitation) => source.chunkId)
-                  if (message.role === 'agent' && message.content.length > 0 && message.status !== 'loading') {
-                    Button(this.speaking ? '停止朗读' : '朗读回答').height(28 * this.fontScale).fontSize(11 * this.fontScale).fontColor(UiTheme.primary).backgroundColor(UiTheme.raised)
-                      .id(`reply-speech-${index}`).fontWeight(FontWeight.Regular).borderRadius(7 * this.fontScale).padding({ left: 12 * this.fontScale, right: 12 * this.fontScale, top: 0 * this.fontScale, bottom: 0 * this.fontScale })
-                      .interactive().onClick(() => this.toggleSpeech(message.content))
+                  if (message.role === 'agent') {
+                    Row({ space: 7 * this.fontScale }) {
+                      if (message.status !== 'loading' && MarkdownParser.answer(message.content).body.trim().length > 0) {
+                        ReplyActions({ content: message.content, documentId: `${index}`,
+                          speaking: this.speaking && this.speakingReply === `${this.activeSession}-${index}`,
+                          onSpeak: () => this.toggleSpeech(message.content, `${this.activeSession}-${index}`) })
+                      }
+                      Text(message.meta).fontSize(9 * this.fontScale).fontColor('#999999').maxLines(1)
+                        .textOverflow({ overflow: TextOverflow.Ellipsis }).layoutWeight(1)
+                      Text(MessageTimeService.label(message, this.messageClock)).fontSize(9 * this.fontScale).fontColor('#999999')
+                        .id(`message-time-${index}`).accessibilityText(`回答时间：${MessageTimeService.full(MessageTimeService.timestamp(message))}`)
+                    }.width('100%').margin({ top: 3 * this.fontScale })
+                  } else {
+                    Text(MessageTimeService.label(message, this.messageClock)).fontSize(9 * this.fontScale).fontColor('#999999')
+                      .id(`message-time-${index}`).accessibilityText(`发送时间：${MessageTimeService.full(MessageTimeService.timestamp(message))}`)
                   }
-                }.id(`message-bubble-${index}`).alignItems(HorizontalAlign.Start).width(message.role === 'agent' ? '100%' : '86%').constraintSize({ maxWidth: 720 * this.fontScale }).padding(13 * this.fontScale).backgroundColor(message.role === 'agent' ? UiTheme.agentBubble : UiTheme.userBubble).borderRadius(13 * this.fontScale)
-              }.width('100%').justifyContent(message.role === 'agent' ? FlexAlign.Start : FlexAlign.End)
+                }.id(`message-bubble-${index}`).alignItems(message.role === 'agent' ? HorizontalAlign.Start : HorizontalAlign.End).width(message.role === 'agent' ? '100%' : 'auto')
+                  .constraintSize({ maxWidth: (message.role === 'agent' ? 800 : 720) * this.fontScale })
+                  .padding(13 * this.fontScale).backgroundColor(message.role === 'agent' ? UiTheme.agentBubble : UiTheme.userBubble).borderRadius(13 * this.fontScale)
+              }.width('100%').justifyContent(message.role === 'agent' ? FlexAlign.Center : FlexAlign.End)
             // ForEach reuses nodes with unchanged keys. Replacing an interface object alone
             // does not refresh its captured fields, so include the reply revision in its key.
             }, (message: AgentMessage, index: number) => `${this.activeSession}-${message.role}-${index}-${message.renderRevision || 0}`)
@@ -2012,7 +2020,16 @@ struct Index {
               }, (source: SourceCitation) => source.chunkId)
             }.width('100%')
           }
-          Row({ space: 10 * this.fontScale }) {
+          Column({ space: 4 * this.fontScale }) {
+            TextArea({ text: this.inputText, placeholder: this.chatPlaceholder() })
+              .inputFeedback()
+              .fontSize(13 * this.fontScale).placeholderFont({ size: 13 * this.fontScale }).lineHeight(20 * this.fontScale)
+              .id('chat-input').width('100%').constraintSize({ minHeight: 36 * this.fontScale, maxHeight: 160 * this.fontScale })
+              .backgroundColor(Color.Transparent).borderRadius(6 * this.fontScale)
+              .padding({ left: 6 * this.fontScale, right: 6 * this.fontScale, top: 8 * this.fontScale, bottom: 8 * this.fontScale })
+              .caretColor(UiTheme.primary).selectedBackgroundColor('#DDDDDD').enterKeyType(EnterKeyType.NEW_LINE)
+              .onChange((value: string) => this.inputText = value)
+            Row({ space: 8 * this.fontScale }) {
             Text('＋').fontSize(19 * this.fontScale).fontColor('#505050').width(28 * this.fontScale).height(36 * this.fontScale).textAlign(TextAlign.Center)
               .accessibilityText('导入文件或图片').enabled(!this.thinking && !this.recording && !this.voiceBusy && !this.attachmentBusy)
               .interactive().bindMenu([{ value: '导入文件', action: () => this.pickAttachments(false) }, { value: '选择图片', action: () => this.pickAttachments(true) }])
@@ -2022,16 +2039,19 @@ struct Index {
               else { Image($r('app.media.ic_microphone')).width(18 * this.fontScale).height(18 * this.fontScale) }
             }.width(32 * this.fontScale).height(36 * this.fontScale).backgroundColor(Color.Transparent).borderRadius(6 * this.fontScale)
               .accessibilityText(this.recording ? '结束录音' : '麦克风语音识别').interactive().onClick(() => this.toggleVoice())
-            TextInput({ text: this.inputText, placeholder: this.activeFeature === 'home' ? '向 CampusPilot 描述你的下一步…' : `在${this.selectedFeature().name}中，想做些什么…` }).fontSize(13 * this.fontScale).placeholderFont({ size: 13 * this.fontScale }).id('chat-input').layoutWeight(1).height(36 * this.fontScale).backgroundColor(Color.Transparent).borderRadius(6 * this.fontScale).padding({ left: 6 * this.fontScale, right: 6 * this.fontScale }).caretColor(UiTheme.primary).selectedBackgroundColor('#DDDDDD').inputFeedback().onChange((value: string) => this.inputText = value).onSubmit(() => this.sendMessage(this.inputText))
+            Blank()
+            if (this.thinking) { Text('停止').fontSize(12 * this.fontScale).fontColor(UiTheme.primary).height(36 * this.fontScale).padding({ left: 6 * this.fontScale, right: 6 * this.fontScale }).id('chat-stop').interactive().onClick(() => this.stopReply()) }
             Button({ type: ButtonType.Circle }) {
               Text('➤').fontSize(15 * this.fontScale).fontColor(UiTheme.onPrimary).rotate({ angle: -45 })
             }.id('chat-send').width(32 * this.fontScale).height(32 * this.fontScale).backgroundColor(UiTheme.primary).interactive().onClick(() => this.sendMessage(this.inputText))
-            if (this.thinking) { Text('停止').fontSize(12 * this.fontScale).fontColor(UiTheme.primary).height(36 * this.fontScale).padding({ left: 6 * this.fontScale, right: 6 * this.fontScale }).interactive().onClick(() => this.stopReply()) }
-          }.id('chat-composer').width('100%').padding(5 * this.fontScale).backgroundColor(UiTheme.surface).borderRadius(10 * this.fontScale).border({ width: 1, color: UiTheme.border })
+            }.id('chat-composer-actions').width('100%')
+          }.id('chat-composer').width('100%').constraintSize({ maxWidth: 800 * this.fontScale })
+            .padding(8 * this.fontScale).backgroundColor(UiTheme.surface).borderRadius(10 * this.fontScale).border({ width: 1, color: UiTheme.border })
           Text(this.apiConfigured ? `● 已配置 ${IntegrationService.agent.name} · 管理 API` : '配置外部模型 API · 当前尚未连接模型')
             .fontSize(10 * this.fontScale).fontColor(this.apiConfigured ? UiTheme.primary : UiTheme.muted).width('100%').textAlign(TextAlign.Center)
             .id('api-settings-open').height(24 * this.fontScale).interactive().onClick(() => this.toggleApiSettings())
-        }.width('100%').padding({ left: 26 * this.fontScale, right: 26 * this.fontScale, top: 10 * this.fontScale, bottom: 14 * this.fontScale }).backgroundColor(UiTheme.background)
+        }.width('100%').constraintSize({ maxWidth: 852 * this.fontScale })
+          .padding({ left: 26 * this.fontScale, right: 26 * this.fontScale, top: 10 * this.fontScale, bottom: 14 * this.fontScale }).backgroundColor(UiTheme.background)
         } else {
           Row({ space: 12 * this.fontScale }) {
             Text(this.activeSession ? '回收站中的会话为只读状态' : '已删除的会话和附件会一直保留，直到永久删除。').fontSize(12 * this.fontScale).fontColor(UiTheme.muted).layoutWeight(1)
@@ -2041,12 +2061,17 @@ struct Index {
             }
           }.width('100%').padding(20 * this.fontScale).backgroundColor(UiTheme.raised)
         }
-      }.layoutWeight(1).height('100%').backgroundColor(UiTheme.background)
+      }.layoutWeight(1).height('100%').backgroundColor(UiTheme.background).clip(true)
         .bindSheet($$this.apiSettingsVisible, this.ApiSettingsSheet(), { height: '78%', width: 620,
           preferType: SheetType.CENTER, showClose: false, dragBar: false,
           onDisappear: () => { this.apiSettingsVisible = false } })
 
-      if (this.isTaskPanelVisible && !this.isWelcomePage && this.activeFeature !== 'trash') { this.ResizeHandle('right'); this.TaskPanel() }
+      if (!this.isWelcomePage && this.activeFeature !== 'trash') {
+        Row() { this.ResizeHandle('right'); this.TaskPanel() }
+          .panelLayoutWidth(this.isTaskPanelVisible ? this.panelWidth('right') + 8 : 0)
+          .animation({ duration: this.resizingPanel ? 0 : 220, curve: Curve.EaseInOut })
+          .height('100%').clip(true).id('right-panel-slot')
+      }
       }.width('100%').height('100%').transition(UiMotion.page())
       }
       }.layoutWeight(1).height('100%').clip(true)

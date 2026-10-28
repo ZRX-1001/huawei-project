@@ -6,6 +6,8 @@ export interface AgentMessage {
   role: string
   content: string
   meta: string
+  createdAt?: number
+  completedAt?: number
   sources?: SourceCitation[]
   status?: string
   renderRevision?: number
