@@ -1,6 +1,6 @@
 import { AgentGateway, AgentRequest, ModuleAdapter, ModuleResult, StreamSink, VoiceAdapter } from '../models/IntegrationModels'
 import { SourceCitation, KnowledgeRepository, QueryEmbedder } from '../models/RagModels'
-import { MemoryKnowledgeRepository } from './KnowledgeService'
+import { MemoryKnowledgeRepository, xuanShenKnowledgeIndex } from './KnowledgeService'
 import { RagService } from './RagService'
 import { AgentApiSettings } from '../config/ApiConfig'
 import { OpenAiCompatibleGateway } from './OpenAiCompatibleGateway'
@@ -9,6 +9,8 @@ import { HarmonyVoiceAdapter } from './HarmonyVoiceAdapter'
 import { HarmonyScheduleAdapter } from './HarmonyScheduleAdapter'
 import { SchedulePlatform } from '../models/ScheduleModels'
 import { LibraryService } from './LibraryService'
+import { StudentQueryEmbedder } from './StudentQueryEmbedder'
+import { FocusModuleAdapter } from './FocusGuardService'
 
 // 可运行的离线摘录模式，不冒充已经接入真实大模型。
 export class ExtractiveGateway implements AgentGateway {
@@ -46,12 +48,15 @@ export class UnavailableVoice implements VoiceAdapter {
 // 对话网关可在聊天页配置；其他能力由各模块负责人接入。
 export class IntegrationService {
   static knowledge: KnowledgeRepository = new MemoryKnowledgeRepository()
-  static embedder: QueryEmbedder | undefined = undefined
+  static embedder: QueryEmbedder = new StudentQueryEmbedder()
   static library: LibraryService | undefined = undefined
   static initializeLibrary(context: common.Context): void {
     if (IntegrationService.library !== undefined) return
-    const library = new LibraryService(context.filesDir, IntegrationService.knowledge)
-    IntegrationService.library = library; IntegrationService.knowledge = library
+    const base = new MemoryKnowledgeRepository()
+    base.replace(xuanShenKnowledgeIndex())
+    const library = new LibraryService(context.filesDir, base)
+    IntegrationService.library = library
+    IntegrationService.knowledge = library
   }
   static agent: AgentGateway = new OpenAiCompatibleGateway({ baseUrl: '', model: '', apiKey: '' })
   static agentSettings: AgentApiSettings = { baseUrl: '', model: '', apiKey: '' }
@@ -65,6 +70,9 @@ export class IntegrationService {
   }
   static initializeVoice(context: common.UIAbilityContext): void {
     if (IntegrationService.voice instanceof UnavailableVoice) IntegrationService.voice = new HarmonyVoiceAdapter(context)
+  }
+  static initializeFocus(context: common.UIAbilityContext): void {
+    IntegrationService.hardware = new FocusModuleAdapter(context)
   }
   static rag(): RagService { return new RagService(IntegrationService.knowledge, IntegrationService.embedder) }
   static configureAgent(settings: AgentApiSettings): void {

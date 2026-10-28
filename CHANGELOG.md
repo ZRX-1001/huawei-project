@@ -4,6 +4,14 @@
 
 ## 2026-10-28
 
+### 资料库前端基准迁移与知识库重写
+
+- 基于远端新仓库 `LibraryPage` / `LibraryService` / `LibraryModels` 重写知识库前端：资料库统一管理本地文件、图片、粘贴文本、RAG JSON 与内置炫神知识库。
+- `IntegrationService.initializeLibrary` 默认注入炫神（许昊龙）14 段资料；本地文本分段补 `local-hash-64` 向量，默认 `StudentQueryEmbedder` 参与关键词 + 余弦混合检索。
+- 移除旧 `KnowledgeAdminPanel` 作为知识库前端，保留 `ONNX_INTEGRATION.md` 与 MiniLM 词表作为后续端侧模型接入资料。
+- 迁移自律魔方番茄钟与 Screen Time Guard 设备专注锁：分钟时长、APP 白名单、暂停解除、继续按剩余时长重开，以及 Agent `focus_lock` 工具。
+- DevEco 构建通过；新仓库 11 组回归（资料库、Agent、日程、交互、会话、侧栏、网关、附件、API、执行记录、消息时间）通过。
+
 ### 模型配置字号、列表与发送图标适配
 
 - 配置表单的占位文字补齐全局字号设置；模型选择改为自定义列表，标题、搜索、列表项和管理按钮一起随字号缩放。

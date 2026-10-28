@@ -31,6 +31,11 @@
         "name": "ohos.permission.MICROPHONE",
         "reason": "$string:microphone_reason",
         "usedScene": { "abilities": ["EntryAbility"], "when": "inuse" }
+      },
+      {
+        "name": "ohos.permission.MANAGE_SCREEN_TIME_GUARD",
+        "reason": "$string:screen_time_guard_reason",
+        "usedScene": { "abilities": ["EntryAbility"], "when": "inuse" }
       }
     ],
     "pages": "$profile:main_pages",

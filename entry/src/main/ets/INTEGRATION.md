@@ -21,6 +21,8 @@
 
 `LibraryService` 包装原有 `KnowledgeRepository`，组合已启用的外部片段和持久化本地资料，实现 `snapshot()`；`IntegrationService.knowledge` 指向该组合仓库。文件迁移/导入复制到 `library_files`，发送附件再次复制到 `chat_attachments`，两者生命周期独立。文本按800字符、120重叠分段；JSON索引校验后保留向量及模型标识，命名空间前缀隔离片段ID。图片无文本索引。`library.json` 保存开关、正文、元数据和删除标记，禁止旧会话重新导入已删除源。
 
+默认 base 为炫神（许昊龙）公开知识库（14 段，`local-hash-64` 向量）。本地文本与导入文本在分段时同样补 `local-hash-64` 向量；`IntegrationService.embedder` 默认使用 `StudentQueryEmbedder`，因此资料库与对话检索可离线执行关键词 + 余弦混合检索。RAG JSON 中已有向量的片段保留原向量与 `vectorModel`，模型不匹配时只参与关键词检索。
+
 `AgentTaskService/Store` 管理周期、状态及最近5次结果；`LocalJsonStore` 使用原子替换、同步备份和短时目录锁。`AgentTaskRuntime` 前台轮询到期任务，并注册一个2小时周期的系统延迟任务；`AgentTaskAbility` 在后台回调时认领到期任务。实际唤醒受系统活跃分组等策略控制，不能作为准时闹钟。跨进程认领先落盘 `runId/runningSince`，周期推进后才调用模型，重复到期合并一次，过期执行记录为中断，旧回调不能覆盖新结果或复活已删除任务。
 
 自动执行最多85秒；工具白名单只有读时间、日历、提醒和本地备忘录的list/read，服务端分派也校验，不能靠模型遵循提示词来保护写操作。后台只检查现有日历授权，不弹窗。普通对话额外提供 `manage_agent_task` 管理任务，执行前展示时间/周期核对；API配置存设备私有首选项供后台读取，清空后不自动复活打包配置。
@@ -166,3 +168,18 @@ Agent 气泡使用 `MarkdownContent` 原生渲染标题、粗体/斜体、列表
 `SidebarService.panelMinimum` 以左220、右244vp为基础，大字号乘以缩放系数提高可读下限；`resize` 将宽度限制在可用范围，在拖动意图宽度小于或等于本次手势开始宽度的1/3时标记待折叠；将拖动点移回1/3以上可取消待折叠。拖动过程中保持最小可读宽度，结束时以最终位移重新判定，满足1/3比例条件才收起并保留手势开始宽度，取消手势不收起；展开按钮恢复保留宽度。`SidebarPreferences.taskPanelVisible` 保存右栏开关，缺失字段按展开兼容旧存档。收起后的左侧图标栏也适应大字号。
 
 气泡操作按钮和朗读按钮使用同一紧凑尺寸与圆角；右侧任务、进度卡片及内边距跟随 `fontScale`。记忆摘要通过 `InteractiveContent.compact` 使用13vp正文基准，保留相同的反馈数据与行为。
+
+## 自律模式与健康使用设备
+
+自律魔方页面提供番茄钟与 Screen Time Guard Kit 设备专注锁。番茄钟默认 25 分钟专注、5 分钟休息，可调整专注时长，支持开始、暂停、重置、进度环和累计番茄数。暂停番茄钟时同步解除设备锁；继续时按剩余分钟重新创建总时长策略，避免系统墙钟计时与暂停状态不一致。
+
+设备锁流程：
+
+1. `guardService.getUserAuthStatus()` / `requestUserAuth()` 获取用户明确授权。
+2. `appPicker.startAppPicker()` 拉起系统应用选择器，返回去标识化 token 作为 APP 白名单。
+3. `addGuardStrategy()` + `startGuardStrategy()` 创建并启动 `TOTAL_DURATION_TYPE` 策略，`totalDuration` 单位为分钟；`TRUSTLIST_TYPE` 表示白名单内应用可用、名单外应用在时长内受限。
+4. `stopGuardStrategy()` + `removeGuardStrategy()` 解除并清理策略。
+
+Agent 在自律魔方工作区可通过 `focus_lock` 工具设置 `action`（start / stop / status）、`durationMinutes`（1-1440）和 `useWhitelist`。只有工具返回 `ok:true` 后才能向用户声称设备锁已生效；权限被拒、设备不支持或用户取消时明确提示，并保留本地番茄钟。
+
+`ohos.permission.MANAGE_SCREEN_TIME_GUARD` 是受限 ACL 权限：调试需在自动签名中启用对应 ACL，发布前需按华为开发者联盟流程申请 ACL 权限。
