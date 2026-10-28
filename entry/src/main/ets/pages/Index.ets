@@ -16,6 +16,7 @@ import { AgentAnswer } from '../components/AgentAnswer'
 import { AttachmentService } from '../services/AttachmentService'
 import { ChatAttachment } from '../models/AttachmentModels'
 import { MarkdownParser } from '../services/MarkdownParser'
+import { NfcFocusBridge } from '../services/NfcFocusBridge'
 import { MarkdownContent } from '../components/MarkdownContent'
 import { WorkspaceConfig } from '../config/WorkspaceConfig'
 import { WorkspaceService } from '../services/WorkspaceService'
@@ -169,6 +170,13 @@ struct Index {
 
   private workspaceProfile(id: string = this.activeFeature): WorkspaceProfile { return WorkspaceConfig.profile(id, this.features) }
 
+  private nfcEvent: (tagId: string) => void = (tagId: string): void => {
+    const focusFeature: FeatureDefinition | undefined = this.features.find((item: FeatureDefinition) => item.id === 'focus')
+    if (focusFeature !== undefined) this.chooseFeature(focusFeature)
+    this.moduleNotice = `NFC 标签 ${tagId} 已触发专注。`
+    this.runModule('nfc')
+  }
+
   aboutToAppear(): void {
     this.messageClock = Date.now()
     this.messageClockTimer = setInterval(() => { this.messageClock = Date.now() }, 60000)
@@ -185,6 +193,10 @@ struct Index {
     } catch (_error) { this.storageNotice = '部分旧附件未迁入资料库，原对话文件仍保留。' }
     IntegrationService.initializeVoice(this.getUIContext().getHostContext() as common.UIAbilityContext)
     IntegrationService.initializeSchedule(this.getUIContext().getHostContext() as common.UIAbilityContext)
+    IntegrationService.initializeDeviceServices(this.getUIContext().getHostContext() as common.UIAbilityContext)
+    host.eventHub.on('focusNfcTap', this.nfcEvent)
+    const pendingNfc = NfcFocusBridge.peek()
+    if (pendingNfc.length > 0) this.nfcEvent(pendingNfc)
     this.refreshKnowledge()
     const savedSidebar = SessionService.sidebar()
     const sidebar = SidebarService.normalize(savedSidebar)
@@ -213,6 +225,9 @@ struct Index {
   }
 
   aboutToDisappear(): void {
+    const host = this.getUIContext().getHostContext() as common.UIAbilityContext
+    host.eventHub.off('focusNfcTap', this.nfcEvent)
+    IntegrationService.disposeDeviceServices()
     this.apiLoadSerial++
     if (this.messageClockTimer >= 0) clearInterval(this.messageClockTimer)
     this.importSerial++
@@ -321,6 +336,7 @@ struct Index {
     let adapter: ModuleAdapter = IntegrationService.forms
     if (this.activeFeature === 'study') adapter = IntegrationService.study
     if (this.activeFeature === 'focus') adapter = IntegrationService.hardware
+    if (this.activeFeature === 'privacy') adapter = IntegrationService.privacy
     try {
       const result: ModuleResult = await adapter.execute(action, this.moduleInput.trim())
       if (token === this.actionSerial) {
@@ -1300,7 +1316,7 @@ struct Index {
     Column({ space: 10 }) {
       Text(this.selectedFeature().name).fontSize(24 * this.fontScale).fontWeight(FontWeight.Medium).fontColor(UiTheme.text)
       Text(this.selectedFeature().description).fontSize(14 * this.fontScale).fontColor(UiTheme.muted)
-      TextInput({ text: this.moduleInput, placeholder: '输入编号或当前模块的操作内容' }).fontSize(13 * this.fontScale).placeholderFont({ size: 13 * this.fontScale }).height(40 * this.fontScale)
+      TextInput({ text: this.moduleInput, placeholder: this.activeFeature === 'privacy' ? '姓名,学号,手机号' : this.activeFeature === 'focus' ? '专注分钟数，如 25' : '输入编号或当前模块的操作内容' }).fontSize(13 * this.fontScale).placeholderFont({ size: 13 * this.fontScale }).height(40 * this.fontScale)
         .backgroundColor(UiTheme.surface).borderRadius(9).padding({ left: 12, right: 8 })
         .caretColor(UiTheme.primary).selectedBackgroundColor('#DDDDDD').inputFeedback().onChange((value: string) => this.moduleInput = value)
       if (this.activeFeature === 'forms') {
@@ -1313,10 +1329,21 @@ struct Index {
         this.ModuleAction('查看提醒', 'reminders')
         this.ModuleAction('生成学习计划', 'plan')
         this.ModuleAction('计划打卡', 'checkin')
+      } else if (this.activeFeature === 'privacy') {
+        this.ModuleAction('保存演示档案', 'save-demo')
+        this.ModuleAction('加密保存档案', 'save-profile')
+        this.ModuleAction('解密并查看档案', 'load-profile')
+        this.ModuleAction('允许上传前预览', 'consent-on')
+        this.ModuleAction('撤销上传授权', 'consent-off')
+        this.ModuleAction('查看授权状态', 'consent-status')
+        this.ModuleAction('清除本机档案', 'clear-profile')
       } else {
-        this.ModuleAction('连接 / 查询设备', 'connect')
+        this.ModuleAction('扫描 / 查询魔方', 'connect')
         this.ModuleAction('开始专注', 'start')
         this.ModuleAction('结束专注', 'stop')
+        this.ModuleAction('NFC 碰一碰', 'nfc')
+        this.ModuleAction('锁机联动状态', 'lock')
+        this.ModuleAction('模拟姿态中断', 'interrupt')
       }
       if (this.moduleNotice.length > 0) {
         Text(this.moduleNotice).fontSize(13 * this.fontScale).fontColor(UiTheme.secondary).lineHeight(21 * this.fontScale).width('100%').padding(12).backgroundColor(UiTheme.raised).borderRadius(10)
@@ -1871,7 +1898,7 @@ struct Index {
             else if (this.activeFeature === 'career') { this.CareerContent() }
             else if (this.activeFeature === 'schedule') { this.ScheduleContent() }
             else if (this.activeFeature === 'budget') { this.BudgetContent() }
-            else if (this.activeFeature === 'forms' || this.activeFeature === 'focus' || this.activeFeature === 'study') { this.ModuleContent() }
+            else if (this.activeFeature === 'forms' || this.activeFeature === 'focus' || this.activeFeature === 'study' || this.activeFeature === 'privacy') { this.ModuleContent() }
             else if (this.activeFeature !== 'home') { this.PlaceholderContent() }
             if (this.activeFeature !== 'trash') { this.WorkspaceAssistantContent() }
             if (this.notice.length > 0) {

@@ -21,8 +21,8 @@ function load(file) {
 const { WorkspaceService: service } = load('services/WorkspaceService');
 const { WORKSPACE_PROFILES: profiles, WorkspaceConfig } = load('config/WorkspaceConfig');
 const { ChatService } = load('services/ChatService');
-assert.equal(profiles.length, 9);
-assert.equal(new Set(profiles.map(p => p.instruction)).size, 9);
+assert.equal(profiles.length, 10);
+assert.equal(new Set(profiles.map(p => p.instruction)).size, 10);
 for (const profile of profiles) {
   assert.ok(profile.instruction.length > 50);
   assert.ok(profile.starters.length >= 2);

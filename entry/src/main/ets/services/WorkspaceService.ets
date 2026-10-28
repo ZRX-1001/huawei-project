@@ -121,7 +121,7 @@ export class WorkspaceService {
     if (name === 'run_workspace_action') {
       const action = WorkspaceService.text(args.action as string, 80)
       const allowed = featureId === 'forms' ? ['templates', 'draft', 'export'] : featureId === 'study'
-        ? ['timetable', 'reminders', 'plan', 'checkin'] : featureId === 'focus' ? ['connect', 'start', 'stop'] : []
+        ? ['timetable', 'reminders', 'plan', 'checkin'] : featureId === 'focus' ? ['connect', 'start', 'stop', 'nfc', 'lock', 'interrupt'] : []
       if (!allowed.includes(action)) throw new Error('当前工作区不支持该业务操作。')
       return { featureId: featureId, state: WorkspaceService.copy(state), message: '等待业务服务结果。', action: action,
         input: WorkspaceService.text(args.input === undefined ? '' : args.input, 4000) }
