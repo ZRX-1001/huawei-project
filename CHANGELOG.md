@@ -16,6 +16,14 @@
 - 新增姿态协议与专注状态机回归测试、参考硬件 BOM/接线/烧录说明及 HarmonyOS/Android/iOS 打包前置条件文档。
 - DevEco CLI 构建通过；姿态协议与专注状态机回归通过。BLE/NFC、系统锁机和 HUKS 仍需鸿蒙真机最终联调。
 
+### 资料库前端基准迁移与知识库重写
+
+- 基于远端新仓库 `LibraryPage` / `LibraryService` / `LibraryModels` 重写知识库前端：资料库统一管理本地文件、图片、粘贴文本、RAG JSON 与内置炫神知识库。
+- `IntegrationService.initializeLibrary` 默认注入炫神（许昊龙）14 段资料；本地文本分段补 `local-hash-64` 向量，默认 `StudentQueryEmbedder` 参与关键词 + 余弦混合检索。
+- 移除旧 `KnowledgeAdminPanel` 作为知识库前端，保留 `ONNX_INTEGRATION.md` 与 MiniLM 词表作为后续端侧模型接入资料。
+- 迁移自律魔方番茄钟与 Screen Time Guard 设备专注锁：分钟时长、APP 白名单、暂停解除、继续按剩余时长重开，以及 Agent `focus_lock` 工具。
+- DevEco 构建通过；新仓库 11 组回归（资料库、Agent、日程、交互、会话、侧栏、网关、附件、API、执行记录、消息时间）通过。
+
 ### 模型配置字号、列表与发送图标适配
 
 - 配置表单的占位文字补齐全局字号设置；模型选择改为自定义列表，标题、搜索、列表项和管理按钮一起随字号缩放。
@@ -297,3 +305,9 @@ Git 提交：`41cca6b`，18:52:10，提交说明“初版”。
 - 建立 HarmonyOS 应用工程，加入 AppScope、entry 模块、Hvigor 与 OHPM 配置。
 - 创建初版 ArkUI 主界面、应用生命周期入口、资源及测试骨架。
 - 建立 Git 忽略与项目基础文件，形成后续界面和功能迭代的起点。
+
+## 2026-10-30
+
+- 合并知识库分支至 main，冲突以知识库功能为准，原硬件入口冲突代码以注释保留，严格 JSON 的旧片段归档于 docs/MERGE_KNOWLEDGE_20261030.md。
+- 保留资料库本地混合检索、专注页面与 focus_lock 工具；独立初始化 main 的隐私档案服务，保留其入口及数据模型。
+- 验证：13 个回归测试文件全部通过；DevEco CLI 构建成功（未配置签名，本次未部署）。旧硬件代码保留产生的 BLE/NFC 权限告警不代表当前专注入口已启用硬件。

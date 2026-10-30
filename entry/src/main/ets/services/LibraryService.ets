@@ -5,6 +5,7 @@ import { LibraryArchive, LibraryDocument } from '../models/LibraryModels'
 import { KnowledgeChunk, KnowledgeIndex, KnowledgeRepository, SourceCitation } from '../models/RagModels'
 import { LocalJsonStore } from './LocalJsonStore'
 import { MemoryKnowledgeRepository } from './KnowledgeService'
+import { LOCAL_VECTOR_MODEL, localHashVector } from './LocalVector'
 
 export class LibraryService implements KnowledgeRepository {
   private store: LocalJsonStore<LibraryArchive>
@@ -83,8 +84,10 @@ export class LibraryService implements KnowledgeRepository {
     const text = document.text.trim()
     const version = LibraryService.fingerprint(text)
     for (let start = 0; start < text.length; start += 680) {
+      const content = text.slice(start, start + 800)
       result.push({ id: `${document.id}:${version}:${start}`, sourceId: document.id, title: document.title,
-        course: document.course, location: `片段 ${result.length + 1}`, content: text.slice(start, start + 800), vector: [], vectorModel: '' })
+        course: document.course, location: `片段 ${result.length + 1}`, content: content,
+        vector: localHashVector(`${document.title} ${content}`), vectorModel: LOCAL_VECTOR_MODEL })
       if (start + 800 >= text.length) break
     }
     return result
